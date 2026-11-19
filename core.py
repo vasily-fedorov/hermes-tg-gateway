@@ -44,6 +44,9 @@ SSRF_HOST_ALLOW = re.compile(r"^https?://(127\.0\.0\.1|localhost|10\.|192\.168\.
 _LOCK = threading.RLock()
 
 # --- approval cards in the approvals topic -----------------------------------
+# Версия протокола хаба (docs/protocol.md в репозитории tg-gateway).
+PROTOCOL_VERSION = "1.0"
+
 _CARD_MARK = "\U0001f6e1 gateway \u00b7 "      # every card starts with this marker
 _CARD_TTL_S = task_state.CARD_TTL_S            # the card clock lives in state.py
 _WATCH: dict[str, bool] = {}
@@ -362,7 +365,8 @@ def tool_send(args: Dict[str, Any], **kwargs: Any) -> str:
                 "message": {"role": "user", "messageId": "m-" + secrets.token_hex(6),
                             "parts": [{"kind": "text", "text": text}]},
                 "to": target,
-                "metadata": {"hops": 1, "transport": "telegram"},
+                "metadata": {"hops": 1, "transport": "telegram",
+                             "protocolVersion": PROTOCOL_VERSION},
             },
         }
         ok = _to_hub(json.dumps(payload, ensure_ascii=False))
@@ -622,6 +626,7 @@ def _a2a_update(item: Dict[str, Any], verdict: str, *, text: str = "") -> bool:
     """A2A-апдейт задачи в хаб: status.state + message/artifact."""
     state = {"done": "completed", "ask": "input-required", "skip": "completed"}[verdict]
     params: Dict[str, Any] = {
+        "protocolVersion": PROTOCOL_VERSION,
         "task": item.get("hub_task") or "",
         "contextId": item.get("context_id") or "",
         "status": {"state": state, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
@@ -925,6 +930,10 @@ async def pre_gateway_dispatch(event, gateway=None, session_store=None, **kwargs
             if method == "message/send":
                 kind = "inbound"
                 meta = params.get("metadata") or {}
+                proto = str(meta.get("protocolVersion") or "")
+                if proto and proto.split(".")[0] != PROTOCOL_VERSION.split(".")[0]:
+                    _audit("protocol_mismatch", hub=proto, mine=PROTOCOL_VERSION)
+                    return {"action": "skip", "reason": "relay:protocol-mismatch"}
                 _parts = ((params.get("message") or {}).get("parts") or [])
                 _chunks, _files = [], []
                 for _p in _parts:

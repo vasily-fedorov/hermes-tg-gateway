@@ -294,6 +294,16 @@ def run() -> dict:
     with store.mutate() as st:   # чтобы не попала в следующий drain
         mod.task_state.TaskStore.transition(st, got[-1]["task_id"], "cancelled")
 
+    # несовпадение мажорной версии протокола — fail-closed
+    bad = json.dumps({"jsonrpc": "2.0", "id": "d-4", "method": "message/send",
+                      "params": {"message": {"role": "user", "messageId": "m-4",
+                                             "parts": [{"kind": "text", "text": "новый протокол"}]},
+                                 "metadata": {"task": "hub88", "hops": 1, "from": "aa",
+                                              "protocolVersion": "2.0"}}})
+    r = asyncio.run(call(make_event(bad, is_bot=True, user_id=HUB_ID, thread_id=None)))
+    assert r == {"action": "skip", "reason": "relay:protocol-mismatch"}, r
+    assert any(ev[0] == "protocol_mismatch" for ev in audited), audited[-3:]
+
     # старый конверт больше не принимается
     legacy = json.dumps({"t": "inbound", "task": "x", "ctx": "c", "hops": 1,
                          "from": "aa", "text": "старый формат"})

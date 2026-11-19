@@ -55,7 +55,7 @@ def run() -> dict:
             "approvals_thread": 1,
             "owner_ids": [int(OWNER)],
             "limits": {"max_text": 3000, "per_hour": 20},
-            "self": {"bot_username": "gateway_alpha", "bot_id": 200000002},
+            "self": {"bot_username": "my_gateway_bot", "bot_id": 200000002},
             "bots": {"gateway_beta": {"title": "peer", "bot_username": "gateway_beta",
                                     "bot_id": int(PEER_BOT_ID), "chat_id": int(GROUP),
                                     "thread_id": 2, "enabled": True}},

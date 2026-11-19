@@ -17,7 +17,7 @@ A2A v1.0 поверх ЛС Telegram, описан в `docs/protocol.md` хаба
 Переключение — поле `mode` в `gateway-routes.json` профиля `gateway`:
 
 ```json
-{"mode": "endpoint", "hub": {"bot_id": 400000004, "username": "gateway_hub_bot"}}
+{"mode": "endpoint", "hub": {"bot_id": 1000000001, "username": "my_hub_bot"}}
 ```
 
 ## Инструменты

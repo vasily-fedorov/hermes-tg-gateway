@@ -56,7 +56,7 @@ def run() -> dict:
             "owner_ids": [int(OWNER)],
             "limits": {"max_text": 3000, "per_hour": 20},
             "self": {"bot_username": "my_gateway_bot", "bot_id": 200000002},
-            "bots": {"gateway_beta": {"title": "peer", "bot_username": "gateway_beta",
+            "bots": {"peer_bot": {"title": "peer", "bot_username": "peer_bot",
                                     "bot_id": int(PEER_BOT_ID), "chat_id": int(GROUP),
                                     "thread_id": 2, "enabled": True}},
         }
@@ -156,7 +156,7 @@ def run() -> dict:
     # 8. outbound: task submitted, card with "Отправить", nothing sent
     cards.clear()
     sent.clear()
-    out = json.loads(mod.tool_send({"target": "gateway_beta", "text": "Сколько времени?"}))
+    out = json.loads(mod.tool_send({"target": "peer_bot", "text": "Сколько времени?"}))
     assert out["status"] == "pending_owner_approval", out
     assert tasks("out", "submitted"), tasks()
     assert cards and cards[0][1][0][1] == f"gwout:ok:{out['task_id']}"
@@ -167,7 +167,7 @@ def run() -> dict:
     edits.clear()
     status = mod.resolve_card_click(f"gwout:ok:{out['task_id']}", OWNER, "cb1", str(GROUP), "card1")
     assert "Отправлено" in status, status
-    assert sent and "@gateway_beta" in sent[0][1] and "gw ctx:" in sent[0][1], sent
+    assert sent and "@peer_bot" in sent[0][1] and "gw ctx:" in sent[0][1], sent
     assert tasks("out", "completed"), tasks("out")
     res["outbound_card_click_completes"] = True
 
@@ -196,7 +196,7 @@ def run() -> dict:
 
     # 13. cancel card -> cancelled + notification to the peer
     mod._send_card_ex = lambda text, buttons: (cards.append((text, buttons)) or (str(GROUP), "card3"))
-    third = json.loads(mod.tool_send({"target": "gateway_beta", "text": "отмени меня"}))
+    third = json.loads(mod.tool_send({"target": "peer_bot", "text": "отмени меня"}))
     sent.clear()
     status = mod.resolve_card_click(f"gwcancel:ok:{third['task_id']}", OWNER, "cb5", str(GROUP), "card3")
     assert "отменена" in status, status

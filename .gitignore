@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+*.log
+gateway-relay-state.json
+gateway-routes.json
+
+# служебное состояние агента
+.omo/

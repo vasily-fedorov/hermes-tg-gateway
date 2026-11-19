@@ -100,7 +100,7 @@ def run() -> dict:
 
     # 3. peer with @mention -> task in `submitted` + card
     cards.clear()
-    r = asyncio.run(call(make_event("@gateway_alpha передай привет", is_bot=True, user_id=PEER_BOT_ID)))
+    r = asyncio.run(call(make_event("@my_gateway_bot передай привет", is_bot=True, user_id=PEER_BOT_ID)))
     assert r == {"action": "skip", "reason": "relay:inbound-parked"}, r
     assert audited[-1][0] == "bot_inbound_parked"
     inbound = tasks("in", "submitted")
@@ -111,13 +111,13 @@ def run() -> dict:
 
     # 3b. own @handle stripped by Telegram -> raw_message still has it
     r = asyncio.run(call(make_event("передай привет", is_bot=True, user_id=PEER_BOT_ID,
-                                    raw_text="@gateway_alpha передай привет")))
+                                    raw_text="@my_gateway_bot передай привет")))
     assert r == {"action": "skip", "reason": "relay:inbound-parked"}, r
     res["mention_from_raw_text"] = True
 
     # 3c. cancel notice from a peer -> no task, no card
     cards.clear()
-    r = asyncio.run(call(make_event("@gateway_alpha [gw ctx:ab12 #cancel] ↩️ задача отменена",
+    r = asyncio.run(call(make_event("@my_gateway_bot [gw ctx:ab12 #cancel] ↩️ задача отменена",
                                     is_bot=True, user_id=PEER_BOT_ID)))
     assert r == {"action": "skip", "reason": "relay:cancel-notice"}, r
     assert audited[-1][0] == "cancel_notice"
@@ -130,7 +130,7 @@ def run() -> dict:
     res["bot_no_mention"] = True
 
     # 4b. hop budget via the context marker
-    r = asyncio.run(call(make_event("@gateway_alpha [gw ctx:ab12 #4] ещё раз", is_bot=True,
+    r = asyncio.run(call(make_event("@my_gateway_bot [gw ctx:ab12 #4] ещё раз", is_bot=True,
                                     user_id=PEER_BOT_ID)))
     assert r == {"action": "skip", "reason": "relay:hop-limit"}, r
     assert audited[-1][0] == "hop_limit"
@@ -145,7 +145,7 @@ def run() -> dict:
 
     # 6. mention rule for humans
     assert asyncio.run(call(make_event("пинг", is_bot=False, user_id=OWNER)))["reason"] == "relay:no-mention"
-    assert asyncio.run(call(make_event("@gateway_alpha пинг", is_bot=False, user_id=OWNER))) is None
+    assert asyncio.run(call(make_event("@my_gateway_bot пинг", is_bot=False, user_id=OWNER))) is None
     res["mention_rule"] = True
 
     # 7. human DM passes through
@@ -186,7 +186,7 @@ def run() -> dict:
 
     # 12. inbound reject -> rejected, nothing sent
     mod._send_card_ex = lambda text, buttons: (cards.append((text, buttons)) or (str(GROUP), "card2"))
-    asyncio.run(call(make_event("@gateway_alpha второй", is_bot=True, user_id=PEER_BOT_ID)))
+    asyncio.run(call(make_event("@my_gateway_bot второй", is_bot=True, user_id=PEER_BOT_ID)))
     second = tasks("in", "submitted")[0]
     sent.clear()
     status = mod.resolve_card_click(f"gwin:no:{second['task_id']}", OWNER, "cb4", str(GROUP), "card2")
@@ -206,7 +206,7 @@ def run() -> dict:
 
     # 14. ASK answer via a reply to the ASK card
     mod._send_card_ex = lambda text, buttons: (cards.append((text, buttons)) or (str(GROUP), "card4"))
-    asyncio.run(call(make_event("@gateway_alpha вопрос про время", is_bot=True, user_id=PEER_BOT_ID)))
+    asyncio.run(call(make_event("@my_gateway_bot вопрос про время", is_bot=True, user_id=PEER_BOT_ID)))
     ask_task = tasks("in", "submitted")[-1]
     with store.mutate() as data:
         mod.task_state.TaskStore.transition(data, ask_task["task_id"], "working")
@@ -226,7 +226,7 @@ def run() -> dict:
         for t in (data.get("tasks") or {}).values():
             if t.get("status") == "working" and t.get("direction") == "in":
                 mod.task_state.TaskStore.transition(data, t["task_id"], "skipped")
-    asyncio.run(call(make_event("@gateway_alpha сколько свободно на диске / ?", is_bot=True,
+    asyncio.run(call(make_event("@my_gateway_bot сколько свободно на диске / ?", is_bot=True,
                                 user_id=PEER_BOT_ID)))
     disk = tasks("in", "submitted")[-1]
     mod.resolve_card_click(f"gwin:ok:{disk['task_id']}", OWNER, "cb6", str(GROUP), "cardA")
@@ -242,7 +242,7 @@ def run() -> dict:
     res["drain_ask_via_default"] = True
 
     # 16. drain: ASK, default не смог -> карточка владельцу, input-required
-    asyncio.run(call(make_event("@gateway_alpha кому принадлежит домен?", is_bot=True,
+    asyncio.run(call(make_event("@my_gateway_bot кому принадлежит домен?", is_bot=True,
                                 user_id=PEER_BOT_ID)))
     stuck = tasks("in", "submitted")[-1]
     mod.resolve_card_click(f"gwin:ok:{stuck['task_id']}", OWNER, "cb7", str(GROUP), "cardA")
@@ -323,7 +323,7 @@ def run() -> dict:
     assert any(t.get("hub_task") == "hub9" and t["status"] == "cancelled" for t in tasks("in"))
 
     # чужой бот в endpoint-режиме не принимается
-    r = asyncio.run(call(make_event("@gateway_alpha привет", is_bot=True, user_id=PEER_BOT_ID)))
+    r = asyncio.run(call(make_event("@my_gateway_bot привет", is_bot=True, user_id=PEER_BOT_ID)))
     assert r == {"action": "skip", "reason": "relay:bot-not-allowed"}, r
     # JSON-RPC ответ хаба не должен уходить в модель
     rpc_resp = json.dumps({"jsonrpc": "2.0", "id": "r-1", "result": {"task": {"id": "x"}}})

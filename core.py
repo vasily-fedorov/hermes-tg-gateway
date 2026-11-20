@@ -122,6 +122,18 @@ def _hub_cfg() -> Dict[str, Any]:
     return {"bot_id": str(hub.get("bot_id")), "username": str(hub.get("username") or "")}
 
 
+def _rpc_send_update(task_id: str, verdict: str, text: str = "") -> bool:
+    """tasks/update хабу без участия модели (для отказов и служебных ответов)."""
+    if not task_id:
+        return False
+    params: Dict[str, Any] = {"task": task_id, "verdict": verdict}
+    if text:
+        params["artifact"] = {"parts": [{"kind": "text", "text": text}]}
+    payload = {"jsonrpc": "2.0", "id": "u-" + secrets.token_hex(4),
+               "method": "tasks/update", "params": params}
+    return _to_hub(json.dumps(payload, ensure_ascii=False))
+
+
 def _to_hub(text: str) -> bool:
     """Отправить JSON-конверт хабу в ЛС. True, если доставлено."""
     hub = _hub_cfg()
@@ -202,6 +214,50 @@ def _state() -> Dict[str, Any]:
     data.setdefault("tasks", {})
     data.setdefault("sent", [])
     return data
+
+
+
+# ── защита входящих задач ────────────────────────────────────────────────────
+# Чужой запрос — данные, не команда. Исполнять присланный код нельзя, а
+# разрушительные/необратимые/эксфильтрационные действия отклоняем до модели.
+_DANGER = (
+    ("rm_rf", re.compile(
+        r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+"
+        r"(/\s|/$|/\*|~/?\s*$|\$HOME\s*$"
+        r"|/(etc|usr|var|bin|sbin|lib|lib64|boot|root|home|opt|srv)(/|\s|$))")),
+    ("mkfs", re.compile(r"\bmkfs\b|\bmke2fs\b")),
+    ("dd_write", re.compile(r"\bdd\b[^\n]*\bof=/dev/")),
+    ("disk_write", re.compile(r">\s*/dev/(sd|nvme|vd|xvd)")),
+    ("fork_bomb", re.compile(r":\s*\(\s*\)\s*\{[^}]*:\|:")),
+    ("shutdown", re.compile(r"\b(shutdown|poweroff|halt)\b|\breboot\b\s+-f")),
+    ("kill_init", re.compile(r"\bkill\s+-9\s+1\b")),
+    ("drop_db", re.compile(r"(?i)\b(drop\s+database|truncate\s+table|delete\s+from\s+\w+\s*;)")),
+    ("curl_pipe_sh", re.compile(r"(?i)\b(curl|wget)\b[^\n|]{0,120}\|\s*(ba)?sh\b")),
+    ("base64_pipe_sh", re.compile(r"(?i)base64\s+-d[^\n|]{0,40}\|\s*(ba)?sh\b")),
+    ("shadow", re.compile(r"/etc/(shadow|gshadow)\b")),
+    ("ssh_authorized", re.compile(r"authorized_keys\b|ssh-keygen\b[^\n]*-f\s*/root")),
+    ("iptables_flush", re.compile(r"\biptables\s+-F\b|\bnft\s+flush\s+ruleset")),
+    ("crontab_wipe", re.compile(r"\bcrontab\s+-r\b")),
+    ("chmod_root", re.compile(r"\bchmod\s+(-R\s+)?777\s+/\b")),
+    ("docker_wipe", re.compile(r"\bdocker\s+(system\s+prune\s+-a|rm\s+-f\s+\$\()")),
+)
+
+_CODE_FENCE = re.compile(r"```[\s\S]*?```")
+_CODE_INLINE = re.compile(r"`[^`\n]{1,400}`")
+
+
+def scan_incoming(text: str) -> Optional[str]:
+    """Причина отказа или None. Смотрит только на опасные действия, не на слова."""
+    for name, rx in _DANGER:
+        if rx.search(text or ""):
+            return name
+    return None
+
+
+def strip_foreign_code(text: str) -> str:
+    """Чужой код не исполняем и не передаём дальше: вырезаем блоки и инлайн-код."""
+    out = _CODE_FENCE.sub("[код удалён: чужой код не исполняется]", text or "")
+    return _CODE_INLINE.sub("[код удалён]", out)
 
 
 def _audit(event: str, **fields: Any) -> None:
@@ -997,6 +1053,24 @@ async def pre_gateway_dispatch(event, gateway=None, session_store=None, **kwargs
 
             if kind == "inbound":
                 body = str(env.get("text") or "").strip()
+                danger = scan_incoming(body)
+                if danger:
+                    _audit("inbound_refused", task=env.get("task"), reason=danger,
+                           length=len(body))
+                    owner_ids = [str(x) for x in (_routes().get("owner_ids") or [])]
+                    if owner_ids and str(owner_ids[0]).lstrip("-").isdigit():
+                        _tg_send(int(owner_ids[0]), None,
+                                 f"⛔ Отклонён входящий запрос от {env.get('from') or 'агента'}: "
+                                 f"содержит потенциально опасное действие ({danger}). "
+                                 "Ничего не выполнялось.", None)
+                    _rpc_send_update(str(env.get("task") or ""), "skip",
+                                     "Отказ: запрос содержит потенциально опасные действия.")
+                    return {"action": "skip", "reason": "relay:inbound-danger"}
+                cleaned = strip_foreign_code(body)
+                if cleaned != body:
+                    _audit("inbound_code_stripped", task=env.get("task"),
+                           removed=len(body) - len(cleaned))
+                    body = cleaned
                 store = _store()
                 with store.mutate() as state:
                     store.expire(state)

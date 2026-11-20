@@ -774,6 +774,17 @@ def tool_progress(args: Dict[str, Any], **kwargs: Any) -> str:
     return json.dumps({"ok": bool(ok), "task": task_id}, ensure_ascii=False)
 
 
+def _mark_delegated(local_id: str) -> None:
+    """Локально: работа ушла в делегацию. drain не должен брать задачу повторно."""
+    try:
+        with _store().mutate() as state:
+            task = (state.get("tasks") or {}).get(local_id)
+            if task is not None and str(task.get("status")) == "working":
+                task["status"] = "delegated"
+    except Exception as exc:
+        _audit("mark_delegated_error", task=local_id, error=str(exc)[:120])
+
+
 def _complete_local(task_id: str) -> None:
     """Отметить задачу завершённой в локальном state (чтобы drain её больше не брал)."""
     try:
@@ -1212,6 +1223,7 @@ def drain_approved_in(ctx: Any = None) -> int:
             )
             reply = _run_profile_turn(f"{question}{hint}")
             _audit("endpoint_turn_done", task=hub_task, reply_len=len(reply or ""))
+            _mark_delegated(task_id)
             if _local_status(hub_task) in ("completed", "failed", "skipped"):
                 done += 1
                 continue

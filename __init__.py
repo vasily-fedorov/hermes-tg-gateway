@@ -113,13 +113,13 @@ def register(ctx) -> None:
     ctx.register_hook("pre_gateway_dispatch", core.pre_gateway_dispatch)
     ctx.register_telegram_handler(_telegram_callback_factory)
 
-    home = Path(__file__).resolve().parents[2]
-    if core._home() != home:
-        ctx.register_tool(name="gateway_inbox", toolset="gateway_relay",
-                          schema=_INBOX_SCHEMA, handler=core.tool_inbox,
-                          description="Owner-approved inbound messages", emoji="\U0001f4e5")
-        return
-
+    # Регистрируем полный набор в КАЖДОМ профиле: что реально видно модели,
+    # решает конфиг профиля (`toolsets` / `platform_toolsets` → gateway_relay).
+    # Хаб-карточка остаётся единственным гейтом на отправку, поэтому профиль
+    # gateway тоже может инициировать запрос, если владелец его об этом просит.
+    ctx.register_tool(name="gateway_inbox", toolset="gateway_relay",
+                      schema=_INBOX_SCHEMA, handler=core.tool_inbox,
+                      description="Owner-approved inbound messages", emoji="\U0001f4e5")
     ctx.register_tool(name="relay_routes", toolset="gateway_relay",
                       schema=_ROUTES_SCHEMA, handler=core.tool_routes,
                       description="Allowlisted relay destinations", emoji="\U0001f517")

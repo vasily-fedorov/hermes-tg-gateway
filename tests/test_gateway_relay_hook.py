@@ -346,6 +346,28 @@ def run() -> dict:
     assert inbox and inbox[-1]["text"] == "31 ГБ свободно" and inbox[-1]["task"] == "hub77", inbox
     assert not [t for t in (state.get("tasks") or {}).values()
                 if "31 ГБ свободно" in str(t.get("text") or "")], "не должно быть новой задачи"
+    # 17c. relay_routes в endpoint-режиме спрашивает хаб, файл — только фолбэк
+    calls = []
+    orig = mod._hub_rpc
+    mod._hub_rpc = lambda method, params, **kw: calls.append((method, params)) or {
+        "routes": [{"alias": "god", "username": "fvv_god_bot", "policy": "auto",
+                    "max_text": 2000, "per_hour": 7, "context": "on",
+                    "explicit_route": True}], "count": 1}
+    try:
+        out = json.loads(mod.tool_routes({}))
+        assert out["source"] == "hub" and out["routes"][0]["alias"] == "god", out
+        assert calls and calls[0][0] == "agent/card", calls
+    finally:
+        mod._hub_rpc = orig
+    # хаб недоступен → фолбэк на локальный файл
+    mod._hub_rpc = lambda method, params, **kw: {"error": "хаб не ответил вовремя"}
+    try:
+        fallback = json.loads(mod.tool_routes({}))
+        assert "source" not in fallback and fallback["count"] >= 1, fallback
+    finally:
+        mod._hub_rpc = orig
+    res["relay_routes_from_hub"] = True
+
     res["endpoint_answer_to_inbox"] = True
 
     res["endpoint_inbound"] = True

@@ -408,6 +408,31 @@ def run() -> dict:
 
     res["a2a_inbound_framing"] = True
 
+    # 17f. отчёт с упоминанием опасной команды — НЕ отказ: фрагмент нейтрализуется
+    sent.clear()
+    report = json.dumps({
+        "jsonrpc": "2.0", "id": "d-rep", "method": "message/send",
+        "params": {"message": {"role": "user", "messageId": "m-rep",
+                               "parts": [{"kind": "text", "text":
+                                          "По docker: причина в модуле xt_comment. Стенд пересоздать: "
+                                          "docker compose up -d --force-recreate, либо "
+                                          "docker rm -f $(docker ps -aq --filter name=aa-local)."}]},
+                   "metadata": {"task": "hubrep", "hops": 1, "from": "god", "kind": "request"}}},
+        ensure_ascii=False)
+    turn_calls = []
+    mod._run_profile_turn = lambda body: turn_calls.append(body) or "DONE: ок"
+    mod._ask_own_default = lambda q, **kw: "принято"
+    out = asyncio.run(mod.pre_gateway_dispatch(make_event(report, is_bot=True, user_id=HUB_ID)))
+    assert not (out and out.get("reason") == "relay:inbound-danger"), out
+    texts = [str(t.get("text") or "") for t in (mod._state().get("tasks") or {}).values()]
+    assert any("[опасный фрагмент: docker_wipe" in t for t in texts), "фрагмент должен быть помечен"
+    assert not [t for t in texts if "docker rm -f $(" in t], "опасный фрагмент не должен остаться как есть"
+    with mod._store().mutate() as st:   # чтобы задача не всплыла в следующих проверках
+        for k, v in list((st.get("tasks") or {}).items()):
+            if str(v.get("hub_task")) == "hubrep":
+                del st["tasks"][k]
+    res["danger_report_neutralized"] = True
+
     res["inbound_danger_refused"] = True
 
     res["answer_attributed_to_owner"] = True

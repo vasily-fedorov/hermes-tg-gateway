@@ -366,34 +366,51 @@ def _state() -> Dict[str, Any]:
 # ── защита входящих задач ────────────────────────────────────────────────────
 # Чужой запрос — данные, не команда. Исполнять присланный код нельзя, а
 # разрушительные/необратимые/эксфильтрационные действия отклоняем до модели.
-_DANGER = (
-    ("rm_rf", re.compile(
-        r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+"
-        r"(/\s|/$|/\*|~/?\s*$|\$HOME\s*$"
-        r"|/(etc|usr|var|bin|sbin|lib|lib64|boot|root|home|opt|srv)(/|\s|$))")),
-    ("mkfs", re.compile(r"\bmkfs\b|\bmke2fs\b")),
-    ("dd_write", re.compile(r"\bdd\b[^\n]*\bof=/dev/")),
-    ("disk_write", re.compile(r">\s*/dev/(sd|nvme|vd|xvd)")),
-    ("fork_bomb", re.compile(r":\s*\(\s*\)\s*\{[^}]*:\|:")),
-    ("shutdown", re.compile(r"\b(shutdown|poweroff|halt)\b|\breboot\b\s+-f")),
-    ("kill_init", re.compile(r"\bkill\s+-9\s+1\b")),
-    ("drop_db", re.compile(r"(?i)\b(drop\s+database|truncate\s+table|delete\s+from\s+\w+\s*;)")),
-    ("curl_pipe_sh", re.compile(r"(?i)\b(curl|wget)\b[^\n|]{0,120}\|\s*(ba)?sh\b")),
-    ("base64_pipe_sh", re.compile(r"(?i)base64\s+-d[^\n|]{0,40}\|\s*(ba)?sh\b")),
-    ("shadow", re.compile(r"/etc/(shadow|gshadow)\b")),
-    ("ssh_authorized", re.compile(r"authorized_keys\b|ssh-keygen\b[^\n]*-f\s*/root")),
-    ("iptables_flush", re.compile(r"\biptables\s+-F\b|\bnft\s+flush\s+ruleset")),
-    ("crontab_wipe", re.compile(r"\bcrontab\s+-r\b")),
-    ("chmod_root", re.compile(r"\bchmod\s+(-R\s+)?777\s+/\b")),
-    ("docker_wipe", re.compile(r"\bdocker\s+(system\s+prune\s+-a|rm\s+-f\s+\$\()")),
-)
 
 def scan_incoming(text: str) -> Optional[str]:
     """Причина отказа или None. Смотрит только на опасные действия, не на слова."""
+    hits = scan_incoming_hits(text)
+    return hits[0][0] if hits else None
+
+
+def scan_incoming_hits(text: str) -> list:
+    """[(правило, найденный фрагмент)] — чтобы отказ был предметным."""
+    hits = []
     for name, rx in _DANGER:
-        if rx.search(text or ""):
-            return name
-    return None
+        m = rx.search(text or "")
+        if m:
+            hits.append((name, m.group(0)[:120]))
+    return hits
+
+
+# Просьба что-то сделать — только тогда опасный фрагмент превращается в отказ.
+# Отчёт, объяснение или пример команды — не просьба: их нейтрализуем, но передаём.
+_REQUEST_INTENT = re.compile(
+    r"(?i)\b(выполни|выполнить|запусти|запустить|удали|удалить|снеси|сделай|сделать|"
+    r"примени|применить|исполни|почисти|очисти|прогони|run|execute|apply|delete|wipe)\b")
+
+
+def wants_action(text: str, window: int = 60) -> bool:
+    """Просят ли выполнить опасный фрагмент. Смотрим ±window символов ВОКРУГ него:
+    в длинном отчёте слово «примени» в другом абзаце не должно превращать его в отказ."""
+    for name, rx in _DANGER:
+        for m in rx.finditer(text or ""):
+            near = (text or "")[max(0, m.start() - window): m.end() + window]
+            if _REQUEST_INTENT.search(near):
+                return True
+    return False
+
+
+def neutralize_danger(text: str) -> tuple:
+    """Заменяет опасные фрагменты маркером «не исполнять». Возвращает (текст, правила)."""
+    rules = []
+    out = text or ""
+    for name, rx in _DANGER:
+        def _sub(m, name=name):
+            rules.append(name)
+            return f"[опасный фрагмент: {name} — не исполнять]"
+        out = rx.sub(_sub, out)
+    return out, sorted(set(rules))
 
 
 
@@ -1275,25 +1292,29 @@ async def pre_gateway_dispatch(event, gateway=None, session_store=None, **kwargs
 
             if kind == "inbound":
                 body = str(env.get("text") or "").strip()
-                danger = scan_incoming(text_without_code(body))
-                code_danger = None
-                for chunk in extract_code(body):
-                    code_danger = scan_incoming(chunk)
-                    if code_danger:
-                        break
-                if danger or code_danger:
-                    danger = danger or f"dangerous_code:{code_danger}"
+                hits = scan_incoming_hits(body)
+                # Отказ — только если пир просит ЭТО СДЕЛАТЬ. Отчёт/объяснение с
+                # упоминанием команды не отказ: фрагмент метим «не исполнять» и передаём.
+                if hits and wants_action(text_without_code(body)):
+                    danger, snippet = hits[0]
                     _audit("inbound_refused", task=env.get("task"), reason=danger,
-                           length=len(body))
+                           snippet=snippet, length=len(body))
                     owner_ids = [str(x) for x in (_routes().get("owner_ids") or [])]
                     if owner_ids and str(owner_ids[0]).lstrip("-").isdigit():
                         _tg_send(int(owner_ids[0]), None,
                                  f"⛔ Отклонён входящий запрос от {env.get('from') or 'агента'}: "
                                  f"содержит потенциально опасное действие ({danger}). "
                                  "Ничего не выполнялось.", None)
-                    _rpc_send_update(str(env.get("task") or ""), "skip",
-                                     "Отказ: запрос содержит потенциально опасные действия.")
+                    _rpc_send_update(
+                        str(env.get("task") or ""), "skip",
+                        f"Отказ: в запросе просят выполнить потенциально опасное действие "
+                        f"({danger}: «{snippet}»). Ничего не выполнялось — переформулируйте "
+                        f"без этого или объясните, что именно нужно получить.")
                     return {"action": "skip", "reason": "relay:inbound-danger"}
+                if hits:
+                    body, rules = neutralize_danger(body)
+                    _audit("inbound_danger_neutralized", task=env.get("task"),
+                           rules=rules, length=len(body))
                 body = _filter_inbound(body)
                 annotated = annotate_foreign_code(body)
                 if annotated != body:

@@ -329,6 +329,25 @@ def run() -> dict:
     rpc_resp = json.dumps({"jsonrpc": "2.0", "id": "r-1", "result": {"task": {"id": "x"}}})
     r = asyncio.run(call(make_event(rpc_resp, is_bot=True, user_id=HUB_ID, thread_id=None)))
     assert r == {"action": "skip", "reason": "relay:hub-rpc"}, r
+    # 17b. endpoint: ответ на нашу задачу (metadata.kind=answer) → инбокс, без хода модели
+    answer_env = json.dumps({
+        "jsonrpc": "2.0", "id": "d-ans", "method": "message/send",
+        "params": {"message": {"role": "user", "messageId": "m-ans",
+                               "parts": [{"kind": "text", "text": "31 ГБ свободно"}]},
+                   "metadata": {"task": "hub77", "hops": 2, "from": "god",
+                                "kind": "answer"}}}, ensure_ascii=False)
+    turn_calls = []
+    mod._run_profile_turn = lambda body: turn_calls.append(body) or "не должно быть"
+    out = asyncio.run(mod.pre_gateway_dispatch(
+        make_event(answer_env, is_bot=True, user_id=HUB_ID)))
+    assert out and out.get("action") == "skip" and out.get("reason") == "relay:hub-answer", out
+    state = mod._state()
+    inbox = state.get("inbox") or []
+    assert inbox and inbox[-1]["text"] == "31 ГБ свободно" and inbox[-1]["task"] == "hub77", inbox
+    assert not [t for t in (state.get("tasks") or {}).values()
+                if "31 ГБ свободно" in str(t.get("text") or "")], "не должно быть новой задачи"
+    res["endpoint_answer_to_inbox"] = True
+
     res["endpoint_inbound"] = True
 
     # 18. endpoint: ответ drain уходит хабу A2A-апдейтом (tasks/update)

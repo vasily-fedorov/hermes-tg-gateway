@@ -951,11 +951,28 @@ async def pre_gateway_dispatch(event, gateway=None, session_store=None, **kwargs
                        "task": meta.get("task"), "ctx": meta.get("from_ctx") or
                        (params.get("message") or {}).get("contextId"),
                        "hops": meta.get("hops") or 1, "from": meta.get("from")}
+                if str(meta.get("kind") or "").strip().lower() == "answer":
+                    kind = "answer"
             else:
                 _audit("hub_unknown_method", method=method)
                 return {"action": "skip", "reason": "relay:hub-unknown"}
 
-            if kind in ("inbound", "answer"):
+            if kind == "answer":
+                # Ответ на нашу задачу: это не запрос — кладём в инбокс и НЕ запускаем ход,
+                # иначе каждый ответ порождает новую задачу (петля до лимита хопов).
+                body = str(env.get("text") or "").strip()
+                store = _store()
+                with store.mutate() as state:
+                    inbox = state.setdefault("inbox", [])
+                    inbox.append({"text": body, "from": str(env.get("from") or "hub"),
+                                  "ctx": str(env.get("ctx") or ""),
+                                  "task": str(env.get("task") or ""),
+                                  "ts": time.time()})
+                    state["inbox"] = inbox[-50:]
+                _audit("hub_answer_inbox", task=env.get("task"), length=len(body))
+                return {"action": "skip", "reason": "relay:hub-answer"}
+
+            if kind == "inbound":
                 body = str(env.get("text") or "").strip()
                 store = _store()
                 with store.mutate() as state:

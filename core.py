@@ -985,6 +985,13 @@ async def pre_gateway_dispatch(event, gateway=None, session_store=None, **kwargs
                                   "task": str(env.get("task") or ""),
                                   "ts": time.time()})
                     state["inbox"] = inbox[-50:]
+                # Показываем владельцу в его чате с явной атрибуцией: иначе ответ
+                # выглядит как реплика этого же бота ("gateway"), а не другого агента.
+                owner_ids = [str(x) for x in (_routes().get("owner_ids") or [])]
+                if owner_ids and str(owner_ids[0]).lstrip("-").isdigit():
+                    who = str(env.get("from") or "агент")
+                    note = f"📬 Ответ от {who}: {body}"
+                    _tg_send(int(owner_ids[0]), None, note[:3500], None)
                 _audit("hub_answer_inbox", task=env.get("task"), length=len(body))
                 return {"action": "skip", "reason": "relay:hub-answer"}
 

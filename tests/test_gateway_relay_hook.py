@@ -368,6 +368,11 @@ def run() -> dict:
         mod._hub_rpc = orig
     res["relay_routes_from_hub"] = True
 
+    # ответ показан владельцу с атрибуцией (иначе выглядит как реплика этого бота)
+    notes = [txt for chat, txt in sent if txt.startswith("📬 Ответ от")]
+    assert notes and "31 ГБ свободно" in notes[-1] and "god" in notes[-1], notes
+    res["answer_attributed_to_owner"] = True
+
     res["endpoint_answer_to_inbox"] = True
 
     res["endpoint_inbound"] = True

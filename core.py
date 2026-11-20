@@ -322,8 +322,8 @@ def tool_routes(args: Dict[str, Any], **kwargs: Any) -> str:
     """Актуальные маршруты: в endpoint-режиме спрашиваем хаб, файл — только фолбэк."""
     hub = _hub_cfg()
     if hub:
-        me = str((_routes().get("self") or {}).get("bot_username") or "").lstrip("@")
-        res = _hub_rpc("agent/card", {"alias": me} if me else {})
+        # Без alias: хаб узнаёт бота по bot_id и сам отдаёт его карточку и маршруты.
+        res = _hub_rpc("agent/card", {})
         if "error" not in res and isinstance(res.get("routes"), list):
             routes = res["routes"]
             _audit("routes_from_hub", count=len(routes), ok=True)

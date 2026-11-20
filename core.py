@@ -774,6 +774,24 @@ def tool_progress(args: Dict[str, Any], **kwargs: Any) -> str:
     return json.dumps({"ok": bool(ok), "task": task_id}, ensure_ascii=False)
 
 
+_INFLIGHT: set = set()
+_INFLIGHT_LOCK = __import__("threading").Lock()
+
+
+def _inflight(local_id: str) -> bool:
+    """True — мы первые, кто взял эту задачу в работу (защита от параллельных тиков)."""
+    with _INFLIGHT_LOCK:
+        if local_id in _INFLIGHT:
+            return False
+        _INFLIGHT.add(local_id)
+        return True
+
+
+def _done_inflight(local_id: str) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.discard(local_id)
+
+
 def _mark_delegated(local_id: str) -> None:
     """Локально: работа ушла в делегацию. drain не должен брать задачу повторно."""
     try:
@@ -1211,6 +1229,10 @@ def drain_approved_in(ctx: Any = None) -> int:
             question = _strip_inbound_frame(text)
             _rpc_progress(hub_task, "принял, выполняю")
             _heartbeat(hub_task)
+            _mark_delegated(task_id)          # до хода: параллельные тики уже не возьмут
+            if not _inflight(task_id):
+                _audit("endpoint_skip_inflight", task=hub_task)
+                continue
             _audit("endpoint_delegate", task=hub_task, peer=peer)
             hint = (
                 "\n\n---\n[Как ответить] Делегируй эту задачу своему основному профилю ровно "
@@ -1221,18 +1243,15 @@ def drain_approved_in(ctx: Any = None) -> int:
                 "text=<ответ>) — это и есть ответ агента. Своим текстом задачу не закрывай и не "
                 "пересказывай ответ; только запусти делегацию и коротко подтверди.]"
             )
-            reply = _run_profile_turn(f"{question}{hint}")
-            _audit("endpoint_turn_done", task=hub_task, reply_len=len(reply or ""))
-            _mark_delegated(task_id)
-            if _local_status(hub_task) in ("completed", "failed", "skipped"):
-                done += 1
-                continue
-            if reply:
-                # делегация не отработала — отдаём то, что есть, чтобы не молчать
-                _rpc_update_state(hub_task, "TASK_STATE_COMPLETED", reply, artifact=True)
-                _complete_local(hub_task)
-                _audit("endpoint_fallback_answer", task=hub_task, length=len(reply))
-                done += 1
+            try:
+                reply = _run_profile_turn(f"{question}{hint}")
+                _audit("endpoint_turn_done", task=hub_task, reply_len=len(reply or ""))
+            finally:
+                _done_inflight(task_id)
+            if _local_status(hub_task) in ("completed", "failed", "skipped", "delegated"):
+                done += 0 if _local_status(hub_task) == "delegated" else 1
+            # Текст модели НЕ отдаём как ответ: ответ пришлёт ребёнок через a2a_answer.
+            _rpc_progress(hub_task, "делегировано основному профилю, жду ответа")
             continue
 
         reply = _run_profile_turn(body)

@@ -455,10 +455,9 @@ def run() -> dict:
     assert "hub42" in body and "a2a_answer" in body, body[-400:]
     assert "[A2A inbound" not in body, "рамку надо снимать перед передачей"
     assert progress and progress[0][0] == "hub42" and "принял" in progress[0][1], progress
-    hub_msgs = [m for m in sent if m[0] == int(HUB_ID)]
-    payload = json.loads(hub_msgs[-1][1])
-    assert payload["method"] == "tasks/update", payload
-    assert payload["params"]["task"] == "hub42", payload
+    # модель НЕ отправляет ответ: текст её реплики в хаб артефактом не уходит
+    wire = [json.loads(m[1]) for m in sent if m[0] == int(HUB_ID) and m[1].startswith("{")]
+    assert not [w for w in wire if "artifact" in (w.get("params") or {})], wire
     res["endpoint_delegate"] = True
 
     sent.clear()

@@ -421,6 +421,14 @@ _LOCAL_SECRETS = (
 )
 
 
+_FRAME_RE = re.compile(r"^\s*\[A2A inbound[^\]]*\]\s*", re.IGNORECASE)
+
+
+def _strip_inbound_frame(text: str) -> str:
+    """Снять рамку «внешний ввод» — default-профилю нужен чистый вопрос."""
+    return _FRAME_RE.sub("", text or "").strip()
+
+
 def _redact_outbound(text: str) -> str:
     """Вычищаем креды из исходящих: модуль A2A из Hermes, иначе — локальные шаблоны."""
     sec = _a2a_sec()
@@ -912,6 +920,26 @@ def drain_approved_in(ctx: Any = None) -> int:
                 f"[gw ctx:{item.get('context_id')} #{hop}] {text}")
         if item.get("answer"):
             body += f"\n[ответ владельца на вопрос «{item.get('question') or ''}»] {item['answer']}"
+        if _hub_cfg():
+            # Endpoint: ответ = ответ основного профиля, дословно. Модель gateway в
+            # формировании текста не участвует — иначе она подменяет ответ планом.
+            question = _strip_inbound_frame(text)
+            answer_text = _ask_own_default(question)
+            if not answer_text:
+                _audit("endpoint_no_default_answer", task=task_id, peer=peer)
+                with store.mutate() as state:
+                    task_state.TaskStore.transition(state, task_id, "skipped")
+                _a2a_update(item, "skip")
+                continue
+            ok = _a2a_update(item, "done", text=answer_text)
+            with store.mutate() as state:
+                task_state.TaskStore.transition(state, task_id,
+                                                "completed" if ok else "failed")
+            _audit("endpoint_answered", task=task_id, peer=peer, via="ask_default",
+                   length=len(answer_text), ok=bool(ok))
+            done += 1 if ok else 0
+            continue
+
         reply = _run_profile_turn(body)
         if not reply:
             _audit("task_turn_failed", task=task_id)
@@ -1010,7 +1038,7 @@ def tool_ask_default(args: Dict[str, Any], **kwargs: Any) -> str:
                              capture_output=True, text=True, timeout=240)
     except Exception as exc:
         return json.dumps({"error": f"default-профиль не ответил: {exc}"[:300]}, ensure_ascii=False)
-    answer = (out.stdout or "").strip()
+    answer = _extract_reply(out.stdout or "") or (out.stdout or "").strip()
     _audit("ask_default", question_len=len(question), answer_len=len(answer), rc=out.returncode)
     if not answer:
         return json.dumps({"error": "пустой ответ", "stderr": (out.stderr or "")[:300]},

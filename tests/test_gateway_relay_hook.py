@@ -416,10 +416,16 @@ def run() -> dict:
 
     res["endpoint_inbound"] = True
 
-    # 18. endpoint: ответ drain уходит хабу A2A-апдейтом (tasks/update)
+    # 18. endpoint: ответ = ответ default-профиля (ask_default), модель не пересказывает
     sent.clear()
-    mod._run_profile_turn = lambda body: "DONE: свободно 31 ГБ"
+    turns = []
+    mod._run_profile_turn = lambda body: turns.append(body) or "DONE: выдумка модели"
+    asked = []
+    mod._ask_own_default = lambda q: asked.append(q) or "свободно 31 ГБ"
     mod.drain_approved_in()
+    assert asked, "должен быть вызван ask_default"
+    assert not turns, "модель gateway не должна формировать ответ в endpoint-режиме"
+    assert "[A2A inbound" not in asked[-1], "рамку надо снимать перед ask_default"
     hub_msgs = [m for m in sent if m[0] == int(HUB_ID)]
     assert hub_msgs, sent
     payload = json.loads(hub_msgs[-1][1])

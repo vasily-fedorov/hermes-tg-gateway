@@ -43,6 +43,12 @@ SSRF_HOST_ALLOW = re.compile(r"^https?://(127\.0\.0\.1|localhost|10\.|192\.168\.
 
 _LOCK = threading.RLock()
 
+# Сколько ждать ответа default-профиля: endpoint-задачи бывают длинными (сборка, запуск
+# сервисов), поэтому ждём долго и повторяем попытку, прежде чем ответить SKIP.
+ASK_DEFAULT_TIMEOUT = float(os.environ.get("GATEWAY_ASK_DEFAULT_TIMEOUT") or 240)
+ASK_DEFAULT_LONG_TIMEOUT = float(os.environ.get("GATEWAY_ASK_DEFAULT_LONG_TIMEOUT") or 900)
+ASK_DEFAULT_ATTEMPTS = int(os.environ.get("GATEWAY_ASK_DEFAULT_ATTEMPTS") or 3)
+
 # --- approval cards in the approvals topic -----------------------------------
 # Версия протокола хаба (docs/protocol.md в репозитории tg-gateway).
 PROTOCOL_VERSION = "1.0"
@@ -861,10 +867,10 @@ def _run_profile_turn(body: str) -> str:
     return reply
 
 
-def _ask_own_default(question: str) -> str:
+def _ask_own_default(question: str, timeout: float | None = None) -> str:
     """Спросить собственный default-профиль (тихий ход CLI). '' если ответа нет."""
     try:
-        res = json.loads(tool_ask_default({"question": question}))
+        res = json.loads(tool_ask_default({"question": question}, timeout=timeout))
     except Exception as exc:  # noqa: BLE001
         _audit("ask_default_error", error=str(exc)[:200])
         return ""
@@ -924,12 +930,26 @@ def drain_approved_in(ctx: Any = None) -> int:
             # Endpoint: ответ = ответ основного профиля, дословно. Модель gateway в
             # формировании текста не участвует — иначе она подменяет ответ планом.
             question = _strip_inbound_frame(text)
-            answer_text = _ask_own_default(question)
+            answer_text = _ask_own_default(question, timeout=ASK_DEFAULT_LONG_TIMEOUT)
             if not answer_text:
-                _audit("endpoint_no_default_answer", task=task_id, peer=peer)
+                attempts = int(item.get("attempts") or 0) + 1
+                give_up = attempts >= ASK_DEFAULT_ATTEMPTS
                 with store.mutate() as state:
-                    task_state.TaskStore.transition(state, task_id, "skipped")
-                _a2a_update(item, "skip")
+                    task = (state.get("tasks") or {}).get(task_id)
+                    if task is not None:
+                        task["attempts"] = attempts
+                    if give_up:
+                        task_state.TaskStore.transition(state, task_id, "skipped")
+                _audit("endpoint_retry", task=task_id, peer=peer, attempts=attempts,
+                       give_up=give_up)
+                if give_up:
+                    _a2a_update(item, "skip")
+                    owner_ids = [str(x) for x in (_routes().get("owner_ids") or [])]
+                    if owner_ids and str(owner_ids[0]).lstrip("-").isdigit():
+                        _tg_send(int(owner_ids[0]), None,
+                                 f"⌛ Задача {item.get('hub_task')} от {peer}: default-профиль "
+                                 f"не ответил за {int(ASK_DEFAULT_LONG_TIMEOUT)} с "
+                                 f"({attempts} попытки). Отправлен SKIP.", None)
                 continue
             ok = _a2a_update(item, "done", text=answer_text)
             with store.mutate() as state:
@@ -1022,7 +1042,7 @@ def start_watcher(ctx: Any) -> None:
     threading.Thread(target=_loop, name="gw-inbound-watcher", daemon=True).start()
 
 
-def tool_ask_default(args: Dict[str, Any], **kwargs: Any) -> str:
+def tool_ask_default(args: Dict[str, Any], timeout: float | None = None, **kwargs: Any) -> str:
     """Ask this agent's own default profile a question (quiet one-shot CLI turn)."""
     question = str(args.get("question") or "").strip()
     if not question:
@@ -1035,7 +1055,8 @@ def tool_ask_default(args: Dict[str, Any], **kwargs: Any) -> str:
     prompt = "[Внешний запрос через gateway от другого агента]\n" + question
     try:
         out = subprocess.run(["hermes", "-p", "default", "chat", "-q", prompt],
-                             capture_output=True, text=True, timeout=240)
+                             capture_output=True, text=True,
+                             timeout=float(timeout or ASK_DEFAULT_TIMEOUT))
     except Exception as exc:
         return json.dumps({"error": f"default-профиль не ответил: {exc}"[:300]}, ensure_ascii=False)
     answer = _extract_reply(out.stdout or "") or (out.stdout or "").strip()

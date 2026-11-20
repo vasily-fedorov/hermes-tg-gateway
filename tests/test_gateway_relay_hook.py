@@ -421,7 +421,7 @@ def run() -> dict:
     turns = []
     mod._run_profile_turn = lambda body: turns.append(body) or "DONE: выдумка модели"
     asked = []
-    mod._ask_own_default = lambda q: asked.append(q) or "свободно 31 ГБ"
+    mod._ask_own_default = lambda q, **kw: asked.append(q) or "свободно 31 ГБ"
     mod.drain_approved_in()
     assert asked, "должен быть вызван ask_default"
     assert not turns, "модель gateway не должна формировать ответ в endpoint-режиме"

@@ -498,6 +498,12 @@ def run() -> dict:
     # 19. the quiet-turn reply parsing still works
     raw = "────\n\u2624 Hermes\nDONE: 42\n────\n\nSession: local-x\n"
     assert mod._extract_reply(raw) == "DONE: 42", mod._extract_reply(raw)
+    # CLI-ошибка (дрейн/нет ключей) — это не ответ: ask_default должен вернуть пусто
+    assert mod._extract_reply("Query: x\nHermes couldn't start the model connection: "
+                             "runtime_draining.\nGoodbye! ☤") == ""
+    assert mod._extract_reply("Query: x\n────────\n☤ Hermes\nОтвет\n────────\n") == "Ответ"
+    res["cli_failure_not_answer"] = True
+
     res["cli_reply_parsing"] = True
 
     return res

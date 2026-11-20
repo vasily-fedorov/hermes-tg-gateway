@@ -1025,9 +1025,21 @@ def resolve_card_click(payload: str, uid: str, cbq_id: str, card_chat: str, card
     return status
 
 
+_CLI_FAILURES = ("couldn't start the model connection", "runtime_draining",
+                 "No usable credentials", "Your message was not sent")
+
+
+def _cli_failed(text: str) -> bool:
+    """CLI не выполнил ход (дрейн, нет ключей) — это НЕ ответ, отдавать его нельзя."""
+    low = (text or "").lower()
+    return any(marker.lower() in low for marker in _CLI_FAILURES)
+
+
 def _extract_reply(stdout: str) -> str:
     """Pull the answer out of a one-shot CLI turn (ANSI and the banner stripped)."""
     clean = re.sub(r"\x1b\[[0-9;]*m", "", stdout or "").replace("\r", "")
+    if _cli_failed(clean):
+        return ""
     lines = clean.splitlines()
     start = None
     for i, line in enumerate(lines):

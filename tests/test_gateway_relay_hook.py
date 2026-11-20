@@ -398,6 +398,16 @@ def run() -> dict:
     state = mod._state()
     assert not [t for t in (state.get("tasks") or {}).values()
                 if "rm -rf" in str(t.get("text") or "")], "задача не создаётся"
+    # 17e. входящее обёрнуто рамкой «внешний недоверенный ввод», исходящее — без кредов
+    frames = [t for task in mod._state().get("tasks", {}).values()
+              if str(task.get("text") or "").startswith("[A2A inbound")]
+    assert frames, "входящие должны быть обёрнуты преамбулой A2A"
+    fake = "123456789:AAH" + "x" * 32          # 35 символов после двоеточия — формат токена
+    assert fake not in mod._redact_outbound(f"токен {fake}")
+    res["a2a_inbound_framing"] = True
+
+    res["a2a_inbound_framing"] = True
+
     res["inbound_danger_refused"] = True
 
     res["answer_attributed_to_owner"] = True

@@ -374,7 +374,10 @@ def run() -> dict:
     # 17d. вредный входящий запрос отклоняется до модели, код из чужого текста вырезается
     assert mod.scan_incoming("rm -rf /") == "rm_rf"
     assert mod.scan_incoming("свободно ли место на диске?") is None
-    assert "[код удалён" in mod.strip_foreign_code("вот код: ```bash\nrm -rf /\n```")
+    dirty = "вот код: ```bash\ndf -h /\n``` и хвост"
+    annotated = mod.annotate_foreign_code(dirty)
+    assert "ЧУЖОЙ КОД" in annotated and "df -h /" in annotated, annotated
+    assert mod.extract_code(dirty) and mod.scan_incoming(mod.text_without_code(dirty)) is None
 
     sent.clear()
     evil = json.dumps({

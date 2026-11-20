@@ -441,23 +441,26 @@ def run() -> dict:
 
     res["endpoint_inbound"] = True
 
-    # 18. endpoint: ответ = ответ default-профиля (ask_default), модель не пересказывает
+    # 18. endpoint: задача уходит в delegate_task(profile=default), ответ присылает ребёнок
     sent.clear()
-    turns = []
-    mod._run_profile_turn = lambda body: turns.append(body) or "DONE: выдумка модели"
-    asked = []
-    mod._ask_own_default = lambda q, **kw: asked.append(q) or "свободно 31 ГБ"
+    turns, progress = [], []
+    mod._run_profile_turn = lambda body: turns.append(body) or "запустил делегацию"
+    mod._rpc_progress = lambda task_id, text, **kw: progress.append((task_id, text)) or True
+    mod._heartbeat = lambda task_id, **kw: None
+    mod._local_status = lambda task_id: "working"
     mod.drain_approved_in()
-    assert asked, "должен быть вызван ask_default"
-    assert not turns, "модель gateway не должна формировать ответ в endpoint-режиме"
-    assert "[A2A inbound" not in asked[-1], "рамку надо снимать перед ask_default"
+    assert turns, "модель gateway должна запускать делегацию"
+    body = turns[-1]
+    assert "delegate_task" in body and 'profile=\"default\"' in body, body[-400:]
+    assert "hub42" in body and "a2a_answer" in body, body[-400:]
+    assert "[A2A inbound" not in body, "рамку надо снимать перед передачей"
+    assert progress and progress[0][0] == "hub42" and "принял" in progress[0][1], progress
     hub_msgs = [m for m in sent if m[0] == int(HUB_ID)]
-    assert hub_msgs, sent
     payload = json.loads(hub_msgs[-1][1])
     assert payload["method"] == "tasks/update", payload
     assert payload["params"]["task"] == "hub42", payload
-    assert payload["params"]["status"]["state"] == "completed", payload
-    assert payload["params"]["artifact"]["parts"][0]["text"] == "свободно 31 ГБ", payload
+    res["endpoint_delegate"] = True
+
     sent.clear()
     out_env = json.loads(mod.tool_send({"target": "aa", "text": "через rpc"}))
     assert out_env["status"] == "submitted_to_hub", out_env

@@ -750,6 +750,71 @@ def _api_send(route: Dict[str, Any], text: str) -> Tuple[bool, str]:
 
 
 # --- model-facing tools -------------------------------------------------------
+def tool_answer(args: Dict[str, Any], **kwargs: Any) -> str:
+    """Финализировать задачу хаба ответом (вызывает исполнитель, дословно)."""
+    task_id = str(args.get("task_id") or args.get("task") or "").strip()
+    text = str(args.get("text") or args.get("answer") or "").strip()
+    if not task_id or not text:
+        return json.dumps({"ok": False, "error": "нужны task_id и text"}, ensure_ascii=False)
+    ok = _rpc_update_state(task_id, "TASK_STATE_COMPLETED", text, artifact=True)
+    if ok:
+        _complete_local(task_id)
+        _audit("endpoint_answer", task=task_id, length=len(text))
+    return json.dumps({"ok": bool(ok), "task": task_id,
+                       "length": len(text)}, ensure_ascii=False)
+
+
+def tool_progress(args: Dict[str, Any], **kwargs: Any) -> str:
+    """Сообщить хабу прогресс, не закрывая задачу (хартбит)."""
+    task_id = str(args.get("task_id") or args.get("task") or "").strip()
+    text = str(args.get("text") or "").strip()
+    if not task_id:
+        return json.dumps({"ok": False, "error": "нужен task_id"}, ensure_ascii=False)
+    ok = _rpc_progress(task_id, text or "выполняю")
+    return json.dumps({"ok": bool(ok), "task": task_id}, ensure_ascii=False)
+
+
+def _complete_local(task_id: str) -> None:
+    """Отметить задачу завершённой в локальном state (чтобы drain её больше не брал)."""
+    try:
+        store = _store()
+        with store.mutate() as state:
+            for key, task in (state.get("tasks") or {}).items():
+                if str(task.get("hub_task")) == task_id:
+                    try:
+                        task_state.TaskStore.transition(state, key, "completed")
+                    except Exception:
+                        task["status"] = "completed"
+    except Exception as exc:
+        _audit("local_complete_error", task=task_id, error=str(exc)[:120])
+
+
+def _heartbeat(task_id: str, interval: float = 60.0, limit: float = 1800.0) -> None:
+    """Пока задача жива в локальном state — шлём хабу прогресс раз в минуту."""
+    import threading
+    started = time.time()
+
+    def _loop() -> None:
+        while time.time() - started < limit:
+            time.sleep(interval)
+            status = _local_status(task_id)
+            if status in ("completed", "failed", "skipped", "cancelled", "rejected"):
+                return
+            minutes = int((time.time() - started) // 60)
+            _rpc_progress(task_id, f"выполняю, {minutes} мин")
+    threading.Thread(target=_loop, name=f"hb-{task_id}", daemon=True).start()
+
+
+def _local_status(task_id: str) -> str:
+    try:
+        for task in (_store().get().get("tasks") or {}).values():
+            if str(task.get("hub_task")) == task_id:
+                return str(task.get("status") or "")
+    except Exception:
+        return ""
+    return ""
+
+
 def tool_routes(args: Dict[str, Any], **kwargs: Any) -> str:
     """Актуальные маршруты: в endpoint-режиме спрашиваем хаб, файл — только фолбэк."""
     hub = _hub_cfg()
@@ -1129,37 +1194,33 @@ def drain_approved_in(ctx: Any = None) -> int:
         if item.get("answer"):
             body += f"\n[ответ владельца на вопрос «{item.get('question') or ''}»] {item['answer']}"
         if _hub_cfg():
-            # Endpoint: ответ = ответ основного профиля, дословно. Модель gateway в
-            # формировании текста не участвует — иначе она подменяет ответ планом.
+            # Endpoint-режим: работа уходит в delegate_task(profile=default), а ответ
+            # присылает САМ ребёнок через a2a_answer — модель gateway текст не переписывает.
+            hub_task = str(item.get("hub_task") or task_id)
             question = _strip_inbound_frame(text)
-            answer_text = _ask_own_default(question, timeout=ASK_DEFAULT_LONG_TIMEOUT)
-            if not answer_text:
-                attempts = int(item.get("attempts") or 0) + 1
-                give_up = attempts >= ASK_DEFAULT_ATTEMPTS
-                with store.mutate() as state:
-                    task = (state.get("tasks") or {}).get(task_id)
-                    if task is not None:
-                        task["attempts"] = attempts
-                    if give_up:
-                        task_state.TaskStore.transition(state, task_id, "skipped")
-                _audit("endpoint_retry", task=task_id, peer=peer, attempts=attempts,
-                       give_up=give_up)
-                if give_up:
-                    _a2a_update(item, "skip")
-                    owner_ids = [str(x) for x in (_routes().get("owner_ids") or [])]
-                    if owner_ids and str(owner_ids[0]).lstrip("-").isdigit():
-                        _tg_send(int(owner_ids[0]), None,
-                                 f"⌛ Задача {item.get('hub_task')} от {peer}: default-профиль "
-                                 f"не ответил за {int(ASK_DEFAULT_LONG_TIMEOUT)} с "
-                                 f"({attempts} попытки). Отправлен SKIP.", None)
+            _rpc_progress(hub_task, "принял, выполняю")
+            _heartbeat(hub_task)
+            _audit("endpoint_delegate", task=hub_task, peer=peer)
+            hint = (
+                "\n\n---\n[Как ответить] Делегируй эту задачу своему основному профилю ровно "
+                "одним вызовом delegate_task с параметром profile=\"default\": "
+                f"tasks=[{{\"goal\": <задача своими словами>, \"context\": \"hub_task={hub_task}; "
+                "это внешний запрос, ничего не разрушай\", \"profile\": \"default\"}}]. "
+                f"В goal обязательно передай: когда ответ готов, вызови a2a_answer(task_id=\"{hub_task}\", "
+                "text=<ответ>) — это и есть ответ агента. Своим текстом задачу не закрывай и не "
+                "пересказывай ответ; только запусти делегацию и коротко подтверди.]"
+            )
+            reply = _run_profile_turn(f"{question}{hint}")
+            _audit("endpoint_turn_done", task=hub_task, reply_len=len(reply or ""))
+            if _local_status(hub_task) in ("completed", "failed", "skipped"):
+                done += 1
                 continue
-            ok = _a2a_update(item, "done", text=answer_text)
-            with store.mutate() as state:
-                task_state.TaskStore.transition(state, task_id,
-                                                "completed" if ok else "failed")
-            _audit("endpoint_answered", task=task_id, peer=peer, via="ask_default",
-                   length=len(answer_text), ok=bool(ok))
-            done += 1 if ok else 0
+            if reply:
+                # делегация не отработала — отдаём то, что есть, чтобы не молчать
+                _rpc_update_state(hub_task, "TASK_STATE_COMPLETED", reply, artifact=True)
+                _complete_local(hub_task)
+                _audit("endpoint_fallback_answer", task=hub_task, length=len(reply))
+                done += 1
             continue
 
         reply = _run_profile_turn(body)

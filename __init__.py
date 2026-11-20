@@ -108,6 +108,36 @@ def _telegram_callback_factory(native, adapter):
     native.add_handler(CallbackQueryHandler(_on_callback, pattern=r"^gw(out|in):"))
 
 
+
+_ANSWER_SCHEMA = {
+    "name": "a2a_answer",
+    "description": ("Финализировать задачу хаба своим ответом. Вызывается ИСПОЛНИТЕЛЕМ "
+                    "(профиль, которому делегировали): текст уходит в хаб дословно, задача "
+                    "закрывается как completed."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "hub_task из делегированной задачи"},
+            "text": {"type": "string", "description": "Ответ по существу, дословно"},
+        },
+        "required": ["task_id", "text"],
+    },
+}
+
+_PROGRESS_SCHEMA = {
+    "name": "a2a_progress",
+    "description": ("Сообщить хабу прогресс по задаче, не закрывая её (хартбит). "
+                    "Используй при долгой работе: «собираю образ», «3 из 5 проверок»."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "hub_task"},
+            "text": {"type": "string", "description": "Что сейчас происходит"},
+        },
+        "required": ["task_id"],
+    },
+}
+
 def register(ctx) -> None:
     # The ingress copy (launch profile home) only needs the inbound hook.
     ctx.register_hook("pre_gateway_dispatch", core.pre_gateway_dispatch)
@@ -135,6 +165,12 @@ def register(ctx) -> None:
     ctx.register_tool(name="relay_cancel", toolset="gateway_relay",
                       schema=_CANCEL_SCHEMA, handler=core.tool_cancel,
                       description="Cancel a submitted task", emoji="\u21a9")
+    ctx.register_tool(name="a2a_answer", toolset="gateway_relay",
+                      schema=_ANSWER_SCHEMA, handler=core.tool_answer,
+                      description="Finish a hub task with the answer", emoji="\u2705")
+    ctx.register_tool(name="a2a_progress", toolset="gateway_relay",
+                      schema=_PROGRESS_SCHEMA, handler=core.tool_progress,
+                      description="Report hub task progress", emoji="\u23f3")
     ctx.register_tool(name="ask_default", toolset="gateway_relay",
                       schema=_ASK_SCHEMA, handler=core.tool_ask_default,
                       description="Ask this agent's default profile", emoji="\U0001f9e0")

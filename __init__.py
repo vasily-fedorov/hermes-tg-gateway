@@ -204,6 +204,16 @@ def register(ctx) -> None:
     ctx.register_tool(name="a2a_progress", toolset="gateway_relay",
                       schema=_PROGRESS_SCHEMA, handler=core.tool_progress,
                       description="Report hub task progress", emoji="\u23f3")
+    ctx.register_tool(name="relay_task", toolset="gateway_relay",
+                      schema={**_TASK_SCHEMA, "name": "relay_task"}, handler=core.tool_task,
+                      description="Hub task state (A2A tasks/get)", emoji="\U0001f50e")
+    ctx.register_tool(name="relay_inbox", toolset="gateway_relay",
+                      schema={**_INBOX_A2A_SCHEMA, "name": "relay_inbox"},
+                      handler=core.tool_a2a_inbox,
+                      description="Async answers from other agents", emoji="\U0001f4ec")
+    ctx.register_tool(name="relay_answer", toolset="gateway_relay",
+                      schema={**_ANSWER_SCHEMA, "name": "relay_answer"}, handler=core.tool_answer,
+                      description="Finish a hub task with the answer", emoji="\u2705")
     ctx.register_tool(name="ask_default", toolset="gateway_relay",
                       schema=_ASK_SCHEMA, handler=core.tool_ask_default,
                       description="Ask this agent's default profile", emoji="\U0001f9e0")

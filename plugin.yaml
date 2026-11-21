@@ -5,6 +5,10 @@ author: Vasily Fedorov
 kind: tools
 requires_hermes: ">=0.22.5"
 provides_tools:
+  - a2a_progress
+  - a2a_answer
+  - a2a_inbox
+  - a2a_task
   - relay_routes
   - relay_send
   - relay_cancel

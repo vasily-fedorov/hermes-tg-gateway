@@ -138,6 +138,33 @@ _PROGRESS_SCHEMA = {
     },
 }
 
+
+_TASK_SCHEMA = {
+    "name": "a2a_task",
+    "description": ("Состояние задачи в хабе (A2A tasks/get): state, прогресс, ответ (artifact), "
+                    "признак done. Используй после relay_send/a2a_call: задача выполняется "
+                    "асинхронно, ответ забирают этим инструментом или из a2a_inbox."),
+    "parameters": {
+        "type": "object",
+        "properties": {"task_id": {"type": "string", "description": "task_id задачи"}},
+        "required": ["task_id"],
+    },
+}
+
+_INBOX_A2A_SCHEMA = {
+    "name": "a2a_inbox",
+    "description": ("Ответы, пришедшие от других агентов асинхронно: from, task, text, ago_s. "
+                    "По умолчанию забирает и очищает прочитанное (ack=true)."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "Сколько последних ответов вернуть (по умолчанию 10)"},
+            "ack": {"type": "boolean", "description": "Пометить прочитанными (по умолчанию true)"},
+        },
+        "required": [],
+    },
+}
+
 def register(ctx) -> None:
     # The ingress copy (launch profile home) only needs the inbound hook.
     ctx.register_hook("pre_gateway_dispatch", core.pre_gateway_dispatch)
@@ -165,6 +192,12 @@ def register(ctx) -> None:
     ctx.register_tool(name="relay_cancel", toolset="gateway_relay",
                       schema=_CANCEL_SCHEMA, handler=core.tool_cancel,
                       description="Cancel a submitted task", emoji="\u21a9")
+    ctx.register_tool(name="a2a_task", toolset="gateway_relay",
+                      schema=_TASK_SCHEMA, handler=core.tool_task,
+                      description="Hub task state (A2A tasks/get)", emoji="\U0001f50e")
+    ctx.register_tool(name="a2a_inbox", toolset="gateway_relay",
+                      schema=_INBOX_A2A_SCHEMA, handler=core.tool_a2a_inbox,
+                      description="Async answers from other agents", emoji="\U0001f4ec")
     ctx.register_tool(name="a2a_answer", toolset="gateway_relay",
                       schema=_ANSWER_SCHEMA, handler=core.tool_answer,
                       description="Finish a hub task with the answer", emoji="\u2705")

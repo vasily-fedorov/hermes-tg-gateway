@@ -504,6 +504,26 @@ def run() -> dict:
     assert mod._extract_reply("Query: x\nHermes couldn't start the model connection: "
                              "runtime_draining.\nGoodbye! ☤") == ""
     assert mod._extract_reply("Query: x\n────────\n☤ Hermes\nОтвет\n────────\n") == "Ответ"
+    # 19. a2a_task: разбор ответа tasks/get; a2a_inbox: выдача и очистка; подсказка про инбокс
+    mod._hub_rpc = lambda method, params, **kw: {"task": {
+        "id": params.get("id"), "status": {"state": "TASK_STATE_COMPLETED",
+        "message": {"parts": [{"kind": "text", "text": "готово"}]}},
+        "artifacts": [{"parts": [{"kind": "text", "text": "свободно 31 ГБ"}]}],
+        "metadata": {"progress": "выполняю, 1 мин"}}}
+    got = json.loads(mod.tool_task({"task_id": "hub42"}))
+    assert got["ok"] and got["done"] is True and got["answer"] == "свободно 31 ГБ", got
+    mod._hub_rpc = lambda method, params, **kw: {"task": {
+        "id": "hub7", "status": {"state": "TASK_STATE_WORKING"}, "metadata": {}}}
+    got = json.loads(mod.tool_task({"task_id": "hub7"}))
+    assert got["done"] is False and "hint" in got, got
+    with mod._store().mutate() as st:
+        st["inbox"] = [{"text": "ответ-1", "from": "aa", "task": "hub1", "ts": 1},
+                       {"text": "ответ-2", "from": "aa", "task": "hub2", "ts": 2}]
+    box = json.loads(mod.tool_a2a_inbox({"limit": 5}))
+    assert box["count"] == 2 and box["items"][-1]["text"] == "ответ-2", box
+    assert json.loads(mod.tool_a2a_inbox({"limit": 5}))["count"] == 0, "ack должен очищать"
+    res["a2a_task_and_inbox"] = True
+
     res["cli_failure_not_answer"] = True
 
     res["cli_reply_parsing"] = True

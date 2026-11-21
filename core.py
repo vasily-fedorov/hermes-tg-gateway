@@ -750,6 +750,54 @@ def _api_send(route: Dict[str, Any], text: str) -> Tuple[bool, str]:
 
 
 # --- model-facing tools -------------------------------------------------------
+def tool_task(args: Dict[str, Any], **kwargs: Any) -> str:
+    """Состояние задачи в хабе (A2A tasks/get): состояние, прогресс, ответ, история."""
+    task_id = str(args.get("task_id") or args.get("id") or "").strip()
+    if not task_id:
+        return json.dumps({"ok": False, "error": "нужен task_id"}, ensure_ascii=False)
+    res = _hub_rpc("tasks/get", {"id": task_id})
+    task = (res or {}).get("task") or {}
+    if not task:
+        return json.dumps({"ok": False, "error": res.get("error") if isinstance(res, dict) else "нет ответа хаба",
+                           "task_id": task_id}, ensure_ascii=False)
+    status = task.get("status") or {}
+    art = ""
+    for artifact in task.get("artifacts") or []:
+        for part in artifact.get("parts") or []:
+            if str(part.get("kind")) == "text":
+                art += str(part.get("text") or "")
+    meta = task.get("metadata") or {}
+    done = str(status.get("state") or "").endswith(("COMPLETED", "FAILED", "CANCELED", "REJECTED"))
+    out = {"ok": True, "task_id": task_id, "state": status.get("state"),
+           "done": done, "progress": meta.get("progress") or "",
+           "status_text": "".join(str(x.get("text") or "") for x in (status.get("message") or {}).get("parts") or []),
+           "answer": art}
+    if not done:
+        out["hint"] = ("Задача ещё выполняется. Проверь позже этим же инструментом; "
+                       "ответ придёт в инбокс (a2a_inbox).")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def tool_a2a_inbox(args: Dict[str, Any], **kwargs: Any) -> str:
+    """Ответы, пришедшие асинхронно от других агентов (a2a_inbox)."""
+    limit = int(args.get("limit") or 10)
+    ack = args.get("ack") is not False          # по умолчанию — забираем и очищаем
+    store = _store()
+    state = store.read()
+    items = list(state.get("inbox") or [])
+    if not items:
+        return json.dumps({"ok": True, "count": 0, "items": [],
+                           "note": "Новых ответов нет."}, ensure_ascii=False)
+    take = items[-limit:]
+    if ack:
+        with store.mutate() as st:
+            st["inbox"] = items[:-limit] if len(items) > limit else []
+    out = [{"from": it.get("from"), "task": it.get("task"),
+            "text": str(it.get("text") or "")[:3000],
+            "ago_s": int(time.time() - float(it.get("ts") or time.time()))} for it in take]
+    return json.dumps({"ok": True, "count": len(out), "items": out}, ensure_ascii=False)
+
+
 def tool_answer(args: Dict[str, Any], **kwargs: Any) -> str:
     """Финализировать задачу хаба ответом (вызывает исполнитель, дословно)."""
     task_id = str(args.get("task_id") or args.get("task") or "").strip()
@@ -836,7 +884,7 @@ def _heartbeat(task_id: str, interval: float = 60.0, limit: float = 1800.0) -> N
 
 def _local_status(task_id: str) -> str:
     try:
-        for task in (_store().get().get("tasks") or {}).values():
+        for task in (_store().read().get("tasks") or {}).values():
             if str(task.get("hub_task")) == task_id:
                 return str(task.get("status") or "")
     except Exception:
@@ -1481,6 +1529,18 @@ async def pre_gateway_dispatch(event, gateway=None, session_store=None, **kwargs
             _audit("no_mention", user_id=uid, thread_id=thread_id,
                    digest=_digest(text), length=len(text))
             return {"action": "skip", "reason": "relay:no-mention"}
+
+        # Ответ от агента пришёл, пока сессия спала: подсказываем модели, что его надо забрать.
+        if not getattr(src, "is_bot", False) and text:
+            try:
+                _pending = len((_store().read().get("inbox") or []))
+            except Exception:
+                _pending = 0
+            if _pending:
+                hint = (f"\n\n[В инбоксе {_pending} непрочитанных ответ(ов) от агентов — "
+                        "забери их инструментом a2a_inbox() и учти в ответе.]")
+                _audit("inbox_hint", pending=_pending)
+                return {"action": "rewrite", "text": (event.text or "") + hint}
 
         hub = _hub_cfg()
         if hub and str(uid) == hub["bot_id"]:

@@ -1275,14 +1275,16 @@ def drain_approved_in(ctx: Any = None) -> int:
             # Endpoint-режим: работа уходит в delegate_task(profile=default), а ответ
             # присылает САМ ребёнок через a2a_answer — модель gateway текст не переписывает.
             hub_task = str(item.get("hub_task") or task_id)
-            question = _strip_inbound_frame(text)
-            _rpc_progress(hub_task, "принял, выполняю")
-            _heartbeat(hub_task)
-            _mark_delegated(task_id)          # до хода: параллельные тики уже не возьмут
+            # Сначала «застолбить» задачу локально и в inflight — ДО любых сетевых вызовов,
+            # иначе параллельный тик успевает прочитать status=working и запускает вторую делегацию.
             if not _inflight(task_id):
                 _audit("endpoint_skip_inflight", task=hub_task)
                 continue
+            _mark_delegated(task_id)
             _audit("endpoint_delegate", task=hub_task, peer=peer)
+            question = _strip_inbound_frame(text)
+            _rpc_progress(hub_task, "принял, выполняю")
+            _heartbeat(hub_task)
             hint = (
                 "\n\n---\n[Как ответить] Делегируй эту задачу своему основному профилю ровно "
                 "одним вызовом delegate_task с параметром profile=\"default\": "

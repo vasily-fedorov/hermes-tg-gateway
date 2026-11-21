@@ -188,13 +188,10 @@ def register(ctx) -> None:
                       description="Agent-facing protocol text", emoji="\U0001f4d8")
     ctx.register_tool(name="relay_status", toolset="gateway_relay",
                       schema=_STATUS_SCHEMA, handler=core.tool_status,
-                      description="Task status via hub", emoji="\U0001f50e")
+                      description="Task state via hub (A2A tasks/get)", emoji="\U0001f50e")
     ctx.register_tool(name="relay_cancel", toolset="gateway_relay",
                       schema=_CANCEL_SCHEMA, handler=core.tool_cancel,
                       description="Cancel a submitted task", emoji="\u21a9")
-    ctx.register_tool(name="a2a_task", toolset="gateway_relay",
-                      schema=_TASK_SCHEMA, handler=core.tool_task,
-                      description="Hub task state (A2A tasks/get)", emoji="\U0001f50e")
     ctx.register_tool(name="a2a_inbox", toolset="gateway_relay",
                       schema=_INBOX_A2A_SCHEMA, handler=core.tool_a2a_inbox,
                       description="Async answers from other agents", emoji="\U0001f4ec")
@@ -204,9 +201,6 @@ def register(ctx) -> None:
     ctx.register_tool(name="a2a_progress", toolset="gateway_relay",
                       schema=_PROGRESS_SCHEMA, handler=core.tool_progress,
                       description="Report hub task progress", emoji="\u23f3")
-    ctx.register_tool(name="relay_task", toolset="gateway_relay",
-                      schema={**_TASK_SCHEMA, "name": "relay_task"}, handler=core.tool_task,
-                      description="Hub task state (A2A tasks/get)", emoji="\U0001f50e")
     ctx.register_tool(name="relay_inbox", toolset="gateway_relay",
                       schema={**_INBOX_A2A_SCHEMA, "name": "relay_inbox"},
                       handler=core.tool_a2a_inbox,

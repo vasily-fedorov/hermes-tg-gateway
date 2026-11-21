@@ -480,7 +480,8 @@ def run() -> dict:
 
     mod._to_hub = fake_to_hub
     view = json.loads(mod.tool_status({"task_id": "t1"}))
-    assert view["task"]["status"]["state"] == "completed", view
+    # relay_status = A2A tasks/get для модели: state, done, прогресс, ответ
+    assert view["ok"] and view["state"] == "completed" and view["done"] is True, view
     res["endpoint_relay_status"] = True
 
     # relay_protocol: текст протокола приходит из хаба

@@ -767,7 +767,8 @@ def tool_task(args: Dict[str, Any], **kwargs: Any) -> str:
             if str(part.get("kind")) == "text":
                 art += str(part.get("text") or "")
     meta = task.get("metadata") or {}
-    done = str(status.get("state") or "").endswith(("COMPLETED", "FAILED", "CANCELED", "REJECTED"))
+    state_raw = str(status.get("state") or "").replace("TASK_STATE_", "").upper()
+    done = state_raw in ("COMPLETED", "FAILED", "CANCELED", "CANCELLED", "REJECTED", "SKIPPED")
     out = {"ok": True, "task_id": task_id, "state": status.get("state"),
            "done": done, "progress": meta.get("progress") or "",
            "status_text": "".join(str(x.get("text") or "") for x in (status.get("message") or {}).get("parts") or []),
@@ -1458,13 +1459,13 @@ def tool_protocol(args: Dict[str, Any], **kwargs: Any) -> str:
 
 
 def tool_status(args: Dict[str, Any], **kwargs: Any) -> str:
-    """Статус задачи у хаба (A2A tasks/get)."""
-    task_id = str(args.get("task_id") or "").strip()
+    """A2A tasks/get: состояние, прогресс, ответ (artifact), признак done."""
+    task_id = str(args.get("task_id") or args.get("id") or "").strip()
     if not task_id:
-        return json.dumps({"error": "нужен task_id"}, ensure_ascii=False)
-    res = _hub_rpc("tasks/get", {"id": task_id})
-    _audit("rpc_tasks_get", task=task_id, ok="error" not in res)
-    return json.dumps(res, ensure_ascii=False)
+        return json.dumps({"ok": False, "error": "нужен task_id"}, ensure_ascii=False)
+    out = json.loads(tool_task({"task_id": task_id}))
+    _audit("rpc_tasks_get", task=task_id, ok=bool(out.get("ok")))
+    return json.dumps(out, ensure_ascii=False)
 
 
 def _is_bot_ui_noise(text: str) -> bool:

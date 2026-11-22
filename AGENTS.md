@@ -8,7 +8,7 @@
 | Файл | Назначение |
 |---|---|
 | `__init__.py` | `register(ctx)`: хук, фабрика Telegram-callback, регистрация инструментов. |
-| `core.py` | хук `pre_gateway_dispatch`, карточки, режимы `group`/`endpoint`, тихий ход, `ask_default`, A2A-клиент. |
+| `core.py` | хук `pre_gateway_dispatch` (вход), `outbox` + `outbound_gate` + правка `apply_edit` (выход), режимы `group`/`endpoint`, `ask_default`, A2A-клиент. |
 | `state.py` | машина состояний агентской задачи, два TTL, миграция 0.1.x. |
 | `plugin.yaml` | манифест: `name`, версия, `provides_tools`, `provides_hooks`. |
 | `tests/` | юнит-тесты без сети. |
@@ -36,6 +36,18 @@ python3 -c "import ast; ast.parse(open('core.py').read())"
 7. **Имя манифеста per-agent**: копируя `plugin.yaml` между агентами, меняйте `name:`
    (у sysadmin `gateway-relay`, у example-agent `group-gateway`) — иначе плагин молча не
    включается и ботовые DM уходят в модель.
+8. **Ответ уходит только через outbox.** Исполнитель кладёт текст инструментом
+   `relay_draft`; в хаб его отправляет `outbox_drain` после `outbound_gate` (секреты,
+   опасные фрагменты, объём, «план вместо ответа»). `relay_answer` — прямой путь мимо
+   шлюза, обязан писать аудит `answer_bypass_gate`. Модель gateway свой текст в хаб не
+   отправляет никогда (`gateway_turn_text_dropped`).
+9. **Один watcher на агента.** В процессе живут две копии плагина (home и
+   profiles/gateway) — `start_watcher` берёт flock на `<home>/gateway-watcher.lock`,
+   иначе каждая задача обрабатывается дважды (двойные делегации и ответы).
+10. **Правка ответа только с проверкой якорей.** При `policy.outbound_edit != off` текст
+    переписывает модель, а `edit_ok()` проверяет кодом: числа, IP, версии, пути, команды и
+    строгие отрицания обязаны остаться, длина 0.4–1.7×. Не прошло — уходит дословный
+    черновик (`edit_rejected`). Судьи-LLM на выходе нет: решение принимает код.
 
 ## Грабли Hermes (проверено)
 

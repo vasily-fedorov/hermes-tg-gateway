@@ -865,6 +865,121 @@ def _outbox_drop(task_id: str) -> None:
                                       encoding="utf-8")
 
 
+
+# ── ступень 2: правка формулировок с проверкой «якорей» ─────────────────────
+# Gateway МОЖЕТ переписать ответ (кратко, нейтрально), но не может потерять факты.
+# Сохранность проверяется кодом: числа, IP, пути, версии, команды, отрицания.
+
+_ANCHORS = (
+    ("ip", re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")),
+    ("version", re.compile(r"\b\d+\.\d+(?:\.\d+)+\b")),
+    ("num", re.compile(r"\b\d+(?:[.,]\d+)?\s?(?:[GMK]i?B\b|GB\b|%|мс\b|сек\b|мин\b|ч\b|дн\b|ядер\b)")),
+    ("path", re.compile(r"(?<![\w.])/(?:[\w.\-]+/)*[\w.\-]+")),
+    ("code", re.compile(r"`([^`]{2,60})`")),
+    ("email", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")),
+)
+# Только настоящие отрицания/сбои: слова состояния («остановлен») сюда нельзя —
+# они бывают и с «не», и без, и проверка перестаёт ловить потерю «не».
+_NEGATIONS = ("не ", "нет ", "без ", "недоступ", "не удалось", "не работает",
+              "не запущен", "failed", "error", "ошиб")
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def anchors(text: str) -> dict:
+    """Факты, которые обязаны пережить правку: {вид: [значения]}."""
+    out: Dict[str, list] = {}
+    src = str(text or "")
+    for kind, rx in _ANCHORS:
+        found = [m.group(1) if m.groups() else m.group(0) for m in rx.finditer(src)]
+        found = [f.strip() for f in found if f and f.strip()]
+        if found:
+            out.setdefault(kind, [])
+            for item in found:
+                if item not in out[kind]:
+                    out[kind].append(item)
+    return out
+
+
+def edit_ok(original: str, rewritten: str) -> tuple:
+    """Можно ли принять правку: (ok, причина)."""
+    if not (rewritten or "").strip():
+        return False, "empty"
+    ratio = len(rewritten) / max(1, len(original))
+    if ratio < 0.4 or ratio > 1.7:
+        return False, f"ratio:{ratio:.2f}"
+    low = rewritten.lower()
+    if any(m in low for m in _PLAN_MARKERS):
+        return False, "plan_marker"
+    norm = _norm(rewritten)
+    for kind, items in anchors(original).items():
+        for item in items:
+            if _norm(item) not in norm:
+                return False, f"lost:{kind}:{item[:40]}"
+    neg_orig = [x for x in _NEGATIONS if x in _norm(original)]
+    neg_new = [x for x in _NEGATIONS if x in norm]
+    for marker in neg_orig:
+        if marker not in neg_new:
+            return False, f"negation_lost:{marker.strip()}"
+    return True, "ok"
+
+
+def _llm_edit(text: str, question: str = "", timeout: float = 25.0) -> str:
+    """Одна правка текста моделью агента (без инструментов). '' если недоступно."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+    except Exception:
+        return ""
+    model_cfg = cfg.get("model") or {}
+    model = str(model_cfg.get("default") or "deepseek-flash")
+    prov = (cfg.get("providers") or {}).get(str(model_cfg.get("provider") or "")) or {}
+    api = str(prov.get("api") or "").rstrip("/")
+    key = os.environ.get(str(prov.get("key_env") or "OPENAI_API_KEY") or "") or \
+        os.environ.get("OPENAI_API_KEY") or ""
+    if not api or not key:
+        _audit("edit_skipped", reason="no_credentials")
+        return ""
+    system = ("Ты редактор ответа агента. Перепиши текст кратко и нейтрально, тем же языком. "
+              "Нельзя: добавлять факты, менять смысл, менять отрицания, выбрасывать числа, IP, "
+              "пути, версии, имена сервисов/контейнеров, команды в бэктиках. "
+              "Никаких пояснений и преамбул — только переписанный текст.")
+    user = f"Вопрос, на который отвечали: {question[:500]}\n\nТекст ответа:\n{text}"
+    body = json.dumps({"model": model, "temperature": 0.2, "max_tokens": 1200,
+                       "messages": [{"role": "system", "content": system},
+                                    {"role": "user", "content": user}]}).encode()
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("TELEGRAM_PROXY") or "").strip()
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"https": proxy} if proxy else {}))
+    try:
+        req = urllib.request.Request(api + "/chat/completions", data=body, headers=headers)
+        res = json.load(opener.open(req, timeout=timeout))
+        return str(res["choices"][0]["message"]["content"] or "").strip()
+    except Exception as exc:
+        _audit("edit_failed", error=str(exc)[:160])
+        return ""
+
+
+def apply_edit(text: str, question: str = "", mode: str = "off") -> tuple:
+    """Правка по режиму. Возвращает (текст, действие)."""
+    if mode not in ("safe", "always"):
+        return text, ""
+    rewritten = _llm_edit(text, question)
+    if not rewritten:
+        return text, "edit_skipped:no_model"
+    if mode == "always":
+        return rewritten, "edited:forced"
+    ok, why = edit_ok(text, rewritten)
+    if not ok:
+        _audit("edit_rejected", reason=why, orig=len(text), new=len(rewritten))
+        return text, f"edit_rejected:{why}"
+    _audit("edit_applied", orig=len(text), new=len(rewritten),
+           anchors=sum(len(v) for v in anchors(text).values()))
+    return rewritten, "edited:safe"
+
 def outbound_gate(text: str, *, peer: str = "", task_id: str = "") -> tuple:
     """Проверка исходящего ответа. Возвращает (текст, действия[], фатально?).
 
@@ -880,6 +995,11 @@ def outbound_gate(text: str, *, peer: str = "", task_id: str = "") -> tuple:
     if len(out) < 160 and any(m in low for m in _PLAN_MARKERS):
         # «сейчас проверю» — это не ответ (старая поломка: план вместо фактов)
         return out, ["plan_not_answer"], True
+    mode = str((_routes().get("policy") or {}).get("outbound_edit") or "off").lower()
+    edited, edit_action = apply_edit(out, question=_outbox_question(task_id), mode=mode)
+    if edit_action:
+        actions.append(edit_action)
+        out = edited
     redacted = _redact_outbound(out)
     if redacted != out:
         out = redacted
@@ -893,11 +1013,18 @@ def outbound_gate(text: str, *, peer: str = "", task_id: str = "") -> tuple:
         cut = out[: max(0, limit - 40)].rstrip()
         out = cut + "\n… (сокращено)"
         actions.append(f"truncated:{len(redacted)}->{len(out)}")
-    mode = str((_routes().get("policy") or {}).get("outbound_edit") or "off").lower()
-    if mode in ("safe", "always"):
-        # Ступень 2: правка формулировок с проверкой якорей. Пока выключена по умолчанию.
-        actions.append("edit_skipped:not_implemented")
     return out, actions, False
+
+
+def _outbox_question(task_id: str) -> str:
+    """Вопрос исходной задачи — контекст для редактора (из локального state)."""
+    try:
+        for task in (_store().read().get("tasks") or {}).values():
+            if str(task.get("hub_task")) == str(task_id):
+                return str(task.get("text") or "")[:500]
+    except Exception:
+        pass
+    return ""
 
 
 def outbox_drain() -> int:

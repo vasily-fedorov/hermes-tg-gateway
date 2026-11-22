@@ -555,6 +555,32 @@ def run() -> dict:
     mod._rpc_update_state = lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен слать"))
     out = json.loads(mod.tool_draft({"task_id": "hub80", "text": "ответ"}))
     assert out["ok"] and queued == [("hub80", 5)], (out, queued)
+    # 21. правка: якоря и отрицания проверяются кодом; плохая правка откатывается
+    orig = ("На / свободно 102G из 300G (67%), сервис nginx не остановлен, "
+            "порт 8080 слушает, версия 1.24.0")
+    good = ("Свободно 102G из 300G (67%). nginx не остановлен, порт 8080 слушает, "
+            "версия 1.24.0")
+    bad_num = "Свободно много места. nginx не остановлен, порт 8080 слушает, версия 1.24.0"
+    bad_neg = "На / свободно 102G из 300G (67%), сервис nginx остановлен, порт 8080, версия 1.24.0"
+    assert mod.edit_ok(orig, good)[0] is True, mod.edit_ok(orig, good)
+    ok, why = mod.edit_ok(orig, bad_num)
+    assert not ok and why.startswith("lost:"), (ok, why)
+    ok, why = mod.edit_ok(orig, bad_neg)
+    assert not ok and (why.startswith("negation_lost") or why.startswith("lost:")), (ok, why)
+    assert not mod.edit_ok(orig, "I'll check it")[0]
+    # apply_edit: при плохой правке остаётся исходный текст
+    mod._llm_edit = lambda text, question="", **kw: bad_num
+    txt, action = mod.apply_edit(orig, mode="safe")
+    assert txt == orig and action.startswith("edit_rejected:"), (txt[:40], action)
+    # при хорошей — берём правку
+    mod._llm_edit = lambda text, question="", **kw: good
+    txt, action = mod.apply_edit(orig, mode="safe")
+    assert txt == good and action == "edited:safe", (txt[:40], action)
+    # режим off — без вызова модели
+    mod._llm_edit = lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен звать модель"))
+    assert mod.apply_edit(orig, mode="off") == (orig, "")
+    res["outbound_edit"] = True
+
     res["outbound_gate"] = True
 
     res["cli_failure_not_answer"] = True

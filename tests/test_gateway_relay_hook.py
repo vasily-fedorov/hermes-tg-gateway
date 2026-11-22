@@ -10,6 +10,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -586,6 +587,89 @@ def run() -> dict:
     res["cli_failure_not_answer"] = True
 
     res["cli_reply_parsing"] = True
+
+    # 22. в endpoint-режиме ответ идёт только через outbox (шлюз не обойти)
+    mod._hub_cfg = lambda: {"bot_id": 900, "username": "my_hub"}
+    mod._outbox_add = lambda tid, text, peer: queued.append((tid, len(text)))
+    mod._allow_direct_answer = lambda: False
+    mod._rpc_update_state = lambda *a, **k: (_ for _ in ()).throw(AssertionError("мимо шлюза"))
+    out = json.loads(mod.tool_answer({"task_id": "hub85", "text": "готово"}))
+    assert out["ok"] and out.get("via") == "outbox", out
+    assert queued[-1] == ("hub85", 6), queued
+    # явный флаг отладки возвращает прямой путь
+    direct = []
+    mod._allow_direct_answer = lambda: True
+    mod._rpc_update_state = lambda tid, state, text="", **kw: direct.append((tid, state)) or True
+    out = json.loads(mod.tool_answer({"task_id": "hub86", "text": "прямо"}))
+    assert out["ok"] and direct == [("hub86", "TASK_STATE_COMPLETED")], (out, direct)
+    assert any(e == "answer_bypass_gate" for e, _ in audited), audited[-3:]
+    res["answer_always_via_outbox"] = True
+
+    # 23. судья: flag — пометка владельцу без блокировки; enforce+block — отказ
+    notes = []
+    mod._notify_owner = lambda text: notes.append(text)
+    mod._outbox_drop = lambda tid: dropped.append(tid)
+    mod._rpc_update_state = lambda tid, state, text="", **kw: sent_box.append((tid, state, text)) or True
+    mod._complete_local = lambda tid: None
+    long_text = "Диск 199G из 300G, память 8,3Gi, load 1.25, uptime 3 дня, swap 1,9Gi." * 2
+    mod._outbox_items = lambda: [{"task_id": "hub91", "peer": "aa", "text": long_text}]
+    mod.judge_policy = lambda: "flag"
+    mod.judge_answer = lambda text, question="", **kw: {"verdict": "suspicious",
+                                                        "risks": ["пересказ конфигурации"],
+                                                        "quotes": ["199G"]}
+    sent_box.clear(); notes.clear()
+    assert mod.outbox_drain() == 1
+    assert sent_box[-1][1] == "TASK_STATE_COMPLETED" and notes and "⚠️" in notes[-1], (sent_box, notes)
+    assert any(e == "judge_verdict" for e, _ in audited)
+    # enforce + block — в хаб уходит FAILED, ответ не доставлен
+    mod.judge_policy = lambda: "enforce"
+    mod.judge_answer = lambda text, question="", **kw: {"verdict": "block",
+                                                        "risks": ["токен в тексте"], "quotes": []}
+    sent_box.clear(); notes.clear()
+    mod.outbox_drain()
+    assert sent_box and sent_box[-1][1] == "TASK_STATE_FAILED", sent_box
+    assert not any(st == "TASK_STATE_COMPLETED" for _, st, _ in sent_box), sent_box
+    # pass — тишина, отправка обычная
+    mod.judge_policy = lambda: "flag"
+    mod.judge_answer = lambda text, question="", **kw: {"verdict": "pass", "risks": [], "quotes": []}
+    sent_box.clear(); notes.clear()
+    mod.outbox_drain()
+    assert sent_box[-1][1] == "TASK_STATE_COMPLETED" and not notes, (sent_box, notes)
+    mod.judge_policy = lambda: "off"
+    res["judge_flag"] = True
+
+    # 24. watchdog: делегация без черновика → failed + уведомление владельцу
+    import contextlib as _ctx
+    class _FakeStore:
+        def __init__(self, data): self.data = data
+        def read(self): return self.data
+        @_ctx.contextmanager
+        def mutate(self):
+            yield self.data
+    fake = _FakeStore({"tasks": {
+        "local1": {"status": "delegated", "hub_task": "hub95", "peer": "aa",
+                   "updated": time.time() - 2000},
+        "local2": {"status": "delegated", "hub_task": "hub96", "peer": "aa",
+                   "updated": time.time() - 2000},
+        "local3": {"status": "delegated", "hub_task": "hub97", "peer": "aa",
+                   "updated": time.time()},
+    }})
+    mod._store = lambda: fake
+    mod._outbox_items = lambda: [{"task_id": "hub96", "peer": "aa", "text": "есть черновик"}]
+    mod._routes = routes
+    mod.answer_timeout_s = lambda: 900.0
+    failed = []
+    mod._rpc_update_state = lambda tid, state, text="", **kw: failed.append((tid, state, text)) or True
+    notes.clear()
+    assert mod.answer_watchdog() == 1, failed
+    assert failed[0][0] == "hub95" and failed[0][1] == "TASK_STATE_FAILED", failed
+    assert "не сформирован" in failed[0][2], failed[0][2]
+    assert notes and "⌛" in notes[0], notes
+    assert fake.data["tasks"]["local1"]["status"] == "failed"
+    assert fake.data["tasks"]["local2"]["status"] == "delegated"   # есть черновик
+    assert fake.data["tasks"]["local3"]["status"] == "delegated"   # ещё не истёк
+    assert any(e == "answer_missing" for e, _ in audited)
+    res["answer_watchdog"] = True
 
     return res
 

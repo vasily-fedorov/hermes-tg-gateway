@@ -953,15 +953,22 @@ def _llm_edit(text: str, question: str = "", timeout: float = 25.0) -> str:
                                     {"role": "user", "content": user}]}).encode()
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
     proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("TELEGRAM_PROXY") or "").strip()
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({"https": proxy} if proxy else {}))
-    try:
-        req = urllib.request.Request(api + "/chat/completions", data=body, headers=headers)
-        res = json.load(opener.open(req, timeout=timeout))
-        return str(res["choices"][0]["message"]["content"] or "").strip()
-    except Exception as exc:
-        _audit("edit_failed", error=str(exc)[:160])
-        return ""
+    # Порядок важен: сначала напрямую (LiteLLM внутри сети docker/http), и только при
+    # неудаче — через прокси. TELEGRAM_PROXY фильтрует всё, кроме Telegram (403 Filtered),
+    # поэтому для внутреннего API он недопустим.
+    attempts: list = [None] + ([proxy] if proxy else [])
+    last = ""
+    for use_proxy in attempts:
+        try:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"https": use_proxy} if use_proxy else {}))
+            req = urllib.request.Request(api + "/chat/completions", data=body, headers=headers)
+            res = json.load(opener.open(req, timeout=timeout))
+            return str(res["choices"][0]["message"]["content"] or "").strip()
+        except Exception as exc:
+            last = str(exc)[:160]
+    _audit("edit_failed", error=last, api=api[:60])
+    return ""
 
 
 def apply_edit(text: str, question: str = "", mode: str = "off") -> tuple:

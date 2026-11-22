@@ -5,6 +5,7 @@ author: Vasily Fedorov
 kind: tools
 requires_hermes: ">=0.22.5"
 provides_tools:
+  - relay_draft
   - relay_answer
   - relay_inbox
   - relay_task

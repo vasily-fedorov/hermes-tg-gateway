@@ -452,7 +452,7 @@ def run() -> dict:
     assert turns, "модель gateway должна запускать делегацию"
     body = turns[-1]
     assert "delegate_task" in body and 'profile=\"default\"' in body, body[-400:]
-    assert "hub42" in body and "a2a_answer" in body, body[-400:]
+    assert "hub42" in body and "relay_draft" in body, body[-400:]
     assert "[A2A inbound" not in body, "рамку надо снимать перед передачей"
     assert progress and progress[0][0] == "hub42" and "принял" in progress[0][1], progress
     # модель НЕ отправляет ответ: текст её реплики в хаб артефактом не уходит
@@ -524,6 +524,38 @@ def run() -> dict:
     assert box["count"] == 2 and box["items"][-1]["text"] == "ответ-2", box
     assert json.loads(mod.tool_a2a_inbox({"limit": 5}))["count"] == 0, "ack должен очищать"
     res["a2a_task_and_inbox"] = True
+
+    # 20. outbox/gate: секреты и опасные фрагменты маскируются, «план» не отправляется
+    fake_tok = "123456789:AAH" + "x" * 32
+    sent_box = []
+    mod._rpc_update_state = lambda tid, state, text="", **kw: sent_box.append((tid, state, text)) or True
+    mod._complete_local = lambda tid: None
+    dropped = []
+    mod._outbox_drop = lambda tid: dropped.append(tid)
+    mod._outbox_items = lambda: [{"task_id": "hub77", "peer": "aa",
+                                  "text": f"готово, токен {fake_tok} и docker rm -f $(docker ps -aq)"}]
+    assert mod.outbox_drain() == 1
+    tid, state, text = sent_box[-1]
+    assert state == "TASK_STATE_COMPLETED" and fake_tok not in text, text
+    assert "[опасный фрагмент: docker_wipe" in text, text
+    assert dropped == ["hub77"], dropped
+    # «сейчас проверю» вместо ответа — не отправляем, задача failed
+    sent_box.clear()
+    mod._outbox_items = lambda: [{"task_id": "hub78", "peer": "aa", "text": "I'll check it on the host."}]
+    sent_box.clear(); mod.outbox_drain()
+    assert sent_box and sent_box[-1][1] == "TASK_STATE_FAILED", sent_box
+    # длинный ответ режется и помечается
+    sent_box.clear()
+    mod._outbox_items = lambda: [{"task_id": "hub79", "peer": "aa", "text": "я" * 4000}]
+    mod.outbox_drain()
+    assert "сокращено" in sent_box[-1][2], sent_box[-1][2][-40:]
+    # relay_draft кладёт в outbox и НЕ пишет в хаб
+    queued = []
+    mod._outbox_add = lambda tid, text, peer: queued.append((tid, len(text)))
+    mod._rpc_update_state = lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен слать"))
+    out = json.loads(mod.tool_draft({"task_id": "hub80", "text": "ответ"}))
+    assert out["ok"] and queued == [("hub80", 5)], (out, queued)
+    res["outbound_gate"] = True
 
     res["cli_failure_not_answer"] = True
 

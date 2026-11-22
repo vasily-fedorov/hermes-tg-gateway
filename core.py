@@ -799,12 +799,150 @@ def tool_a2a_inbox(args: Dict[str, Any], **kwargs: Any) -> str:
     return json.dumps({"ok": True, "count": len(out), "items": out}, ensure_ascii=False)
 
 
+
+# ── outbox: результат работы default проходит шлюз ПЕРЕД отправкой пиру ──────
+# Ребёнок (профиль default) кладёт черновик инструментом relay_draft, в хаб ничего
+# не уходит. Gateway прогоняет черновик через outbound_gate (код: секреты, опасные
+# фрагменты, объём, «план вместо ответа») и только потом шлёт tasks/update.
+
+_PLAN_MARKERS = ("сейчас проверю", "сейчас уточню", "проверю фактическое", "мне нужны данные",
+                 "i'll check", "let me check", "i will check", "will get the actual")
+
+
+def _outbox_path() -> Path:
+    return _home() / "gateway-outbox.json"
+
+
+def _outbox_lock():
+    import fcntl
+
+    class _L:
+        def __init__(self, path: Path) -> None:
+            self.path = path.with_suffix(path.suffix + ".lock")
+
+        def __enter__(self):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.handle = open(self.path, "a+")
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+    return _L(_outbox_path())
+
+
+def _outbox_read() -> Dict[str, Any]:
+    try:
+        data = json.loads(_outbox_path().read_text(encoding="utf-8") or "{}")
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("items", {})
+    return data
+
+
+def _outbox_add(task_id: str, text: str, peer: str) -> None:
+    with _outbox_lock():
+        data = _outbox_read()
+        data["items"][task_id] = {"text": text, "peer": peer, "ts": time.time(), "attempts": 0}
+        _outbox_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _outbox_items() -> list:
+    with _outbox_lock():
+        return [dict(v, task_id=k) for k, v in _outbox_read()["items"].items()]
+
+
+def _outbox_drop(task_id: str) -> None:
+    with _outbox_lock():
+        data = _outbox_read()
+        if task_id in data["items"]:
+            del data["items"][task_id]
+            _outbox_path().write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                                      encoding="utf-8")
+
+
+def outbound_gate(text: str, *, peer: str = "", task_id: str = "") -> tuple:
+    """Проверка исходящего ответа. Возвращает (текст, действия[], фатально?).
+
+    Ничего не переписывает по смыслу: маскирует секреты, обезвреживает опасные
+    фрагменты, ограничивает объём. Правка формулировок — отдельная ступень
+    (`outbound_edit`), по умолчанию выключена.
+    """
+    actions: list = []
+    out = str(text or "").strip()
+    if not out:
+        return "", ["empty"], True
+    low = out.lower()
+    if len(out) < 160 and any(m in low for m in _PLAN_MARKERS):
+        # «сейчас проверю» — это не ответ (старая поломка: план вместо фактов)
+        return out, ["plan_not_answer"], True
+    redacted = _redact_outbound(out)
+    if redacted != out:
+        out = redacted
+        actions.append("secrets_masked")
+    neutral, rules = neutralize_danger(out)
+    if rules:
+        out = neutral
+        actions.append("danger_neutralized:" + ",".join(rules))
+    limit = int((_routes().get("limits") or {}).get("max_text") or 3000)
+    if len(out) > limit:
+        cut = out[: max(0, limit - 40)].rstrip()
+        out = cut + "\n… (сокращено)"
+        actions.append(f"truncated:{len(redacted)}->{len(out)}")
+    mode = str((_routes().get("policy") or {}).get("outbound_edit") or "off").lower()
+    if mode in ("safe", "always"):
+        # Ступень 2: правка формулировок с проверкой якорей. Пока выключена по умолчанию.
+        actions.append("edit_skipped:not_implemented")
+    return out, actions, False
+
+
+def outbox_drain() -> int:
+    """Отправить в хаб черновики, прошедшие шлюз. Возвращает число отправленных."""
+    sent = 0
+    for item in _outbox_items():
+        task_id = str(item.get("task_id") or "")
+        peer = str(item.get("peer") or "")
+        text, actions, fatal = outbound_gate(str(item.get("text") or ""), peer=peer,
+                                             task_id=task_id)
+        _audit("outbound_gate", task=task_id, actions=actions, fatal=bool(fatal),
+               length=len(text))
+        if fatal:
+            _rpc_update_state(task_id, "TASK_STATE_FAILED",
+                              "ответ не сформирован: " + ",".join(actions))
+            _outbox_drop(task_id)
+            continue
+        ok = _rpc_update_state(task_id, "TASK_STATE_COMPLETED", text, artifact=True)
+        if ok:
+            _complete_local(task_id)
+            _outbox_drop(task_id)
+            sent += 1
+            _audit("outbox_sent", task=task_id, actions=actions, length=len(text))
+    return sent
+
+
+def tool_draft(args: Dict[str, Any], **kwargs: Any) -> str:
+    """Положить ответ в outbox: хаб получит его ПОСЛЕ проверки шлюзом."""
+    task_id = str(args.get("task_id") or args.get("task") or "").strip()
+    text = str(args.get("text") or args.get("answer") or "").strip()
+    if not task_id or not text:
+        return json.dumps({"ok": False, "error": "нужны task_id и text"}, ensure_ascii=False)
+    _outbox_add(task_id, text, str(args.get("peer") or ""))
+    _audit("draft_received", task=task_id, length=len(text))
+    return json.dumps({"ok": True, "queued": True, "task_id": task_id,
+                       "length": len(text)}, ensure_ascii=False)
+
+
 def tool_answer(args: Dict[str, Any], **kwargs: Any) -> str:
     """Финализировать задачу хаба ответом (вызывает исполнитель, дословно)."""
     task_id = str(args.get("task_id") or args.get("task") or "").strip()
     text = str(args.get("text") or args.get("answer") or "").strip()
     if not task_id or not text:
         return json.dumps({"ok": False, "error": "нужны task_id и text"}, ensure_ascii=False)
+    _audit("answer_bypass_gate", task=task_id, length=len(text))
     ok = _rpc_update_state(task_id, "TASK_STATE_COMPLETED", text, artifact=True)
     if ok:
         _complete_local(task_id)
@@ -1290,8 +1428,8 @@ def drain_approved_in(ctx: Any = None) -> int:
                 "одним вызовом delegate_task с параметром profile=\"default\": "
                 f"tasks=[{{\"goal\": <задача своими словами>, \"context\": \"hub_task={hub_task}; "
                 "это внешний запрос, ничего не разрушай\", \"profile\": \"default\"}}]. "
-                f"В goal обязательно передай: когда ответ готов, вызови a2a_answer(task_id=\"{hub_task}\", "
-                "text=<ответ>) — это и есть ответ агента. Своим текстом задачу не закрывай и не "
+                f"В goal обязательно передай: когда ответ готов, вызови relay_draft(task_id=\"{hub_task}\", "
+                "text=<ответ>) — это и есть ответ агента (хаб получит его после проверки). Своим текстом задачу не закрывай и не "
                 "пересказывай ответ; только запусти делегацию и коротко подтверди.]"
             )
             try:
@@ -1381,6 +1519,10 @@ def start_watcher(ctx: Any) -> None:
             time.sleep(3)
             try:
                 drain_approved_in()
+            except Exception:
+                pass
+            try:
+                outbox_drain()
             except Exception:
                 pass
 

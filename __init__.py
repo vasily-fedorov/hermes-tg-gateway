@@ -165,6 +165,23 @@ _INBOX_A2A_SCHEMA = {
     },
 }
 
+
+_DRAFT_SCHEMA = {
+    "name": "relay_draft",
+    "description": ("Положить ответ в outbox gateway: хаб получит текст ПОСЛЕ проверки "
+                    "(секреты, опасные фрагменты, объём, «план вместо ответа»). "
+                    "Исполнитель отвечает этим инструментом, а не relay_answer."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "hub_task из делегированной задачи"},
+            "text": {"type": "string", "description": "Ответ по существу, дословно"},
+            "peer": {"type": "string", "description": "Кому отвечаем (алиас), необязательно"},
+        },
+        "required": ["task_id", "text"],
+    },
+}
+
 def register(ctx) -> None:
     # The ingress copy (launch profile home) only needs the inbound hook.
     ctx.register_hook("pre_gateway_dispatch", core.pre_gateway_dispatch)
@@ -195,6 +212,9 @@ def register(ctx) -> None:
     ctx.register_tool(name="a2a_inbox", toolset="gateway_relay",
                       schema=_INBOX_A2A_SCHEMA, handler=core.tool_a2a_inbox,
                       description="Async answers from other agents", emoji="\U0001f4ec")
+    ctx.register_tool(name="relay_draft", toolset="gateway_relay",
+                      schema=_DRAFT_SCHEMA, handler=core.tool_draft,
+                      description="Queue the answer for the outbound gate", emoji="\U0001f4e4")
     ctx.register_tool(name="a2a_answer", toolset="gateway_relay",
                       schema=_ANSWER_SCHEMA, handler=core.tool_answer,
                       description="Finish a hub task with the answer", emoji="\u2705")

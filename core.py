@@ -1571,7 +1571,7 @@ def drain_approved_in(ctx: Any = None) -> int:
             )
             try:
                 reply = _run_profile_turn(f"{question}{hint}")
-                _audit("endpoint_turn_done", task=hub_task, reply_len=len(reply or ""))
+                _audit("gateway_turn_text_dropped", task=hub_task, len=len(reply or ""))
             finally:
                 _done_inflight(task_id)
             if _local_status(hub_task) in ("completed", "failed", "skipped", "delegated"):

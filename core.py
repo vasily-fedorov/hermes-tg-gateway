@@ -1508,9 +1508,28 @@ def drain_approved_in(ctx: Any = None) -> int:
     return done
 
 
+_WATCH_HANDLE = None
+
+
 def start_watcher(ctx: Any) -> None:
-    """Background pump: approved inbound cards -> this profile's session (own chat only)."""
+    """Background pump: inbound tasks + outbox. Ровно ОДИН на агента.
+
+    В процессе живут две копии плагина (home и profiles/gateway) — без общего
+    лок-файла обе поднимают свой watcher, и каждая задача обрабатывается дважды
+    (двойные делегации и двойные ответы в хаб).
+    """
+    global _WATCH_HANDLE
     if _WATCH.get("started"):
+        return
+    try:
+        import fcntl
+        lock_path = _home() / "gateway-watcher.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _WATCH_HANDLE = handle
+    except Exception:
+        _audit("watcher_skip_locked")
         return
     _WATCH["started"] = True
 
